@@ -1044,19 +1044,47 @@ impl eframe::App for Viewer {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label("Drag to pan · Wheel to scroll · Ctrl+wheel / pinch to zoom");
-                    ui.label("Horizontal zoom: Ctrl+Right in · Ctrl+Left out");
-                    ui.label("Vertical zoom: Ctrl+Up in · Ctrl+Down out");
-                    ui.label("X / Y controls zoom each axis; click its percentage to reset");
-                    ui.label("Drag the disassembly edge to resize; both panels overlay the trace");
-                    ui.label(
-                        "Shift+click to place markers · Drag to move · Hover + Delete to remove",
-                    );
-                    ui.label("Inspector → Markers: × removes one; Clear markers removes all");
-                    ui.label("M toggles the whole-trace overview; click / drag to jump to a pipeline row");
-                    ui.label("Drag the overview’s left edge to resize; > / < expands or compacts it");
-                    ui.label("Click an instruction or stage to inspect its metadata");
-                    ui.label("Ctrl+O open · F search · n / p next / previous match · ? help");
+                    ui.set_width((ctx.screen_rect().width() - 60.0).clamp(260.0, 560.0));
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height((ctx.screen_rect().height() - 100.0).max(100.0))
+                        .show(ui, |ui| {
+                            egui::Grid::new("controls_guide")
+                                .num_columns(2)
+                                .striped(false)
+                                .spacing(Vec2::new(32.0, 7.0))
+                                .show(ui, |ui| {
+                                    for (feature, control) in [
+                                        ("Open trace", "Ctrl+O"),
+                                        ("Search", "F / Ctrl+F"),
+                                        ("Next / previous match", "n / p"),
+                                        ("Show this guide", "?"),
+                                        ("Pan trace", "Drag"),
+                                        ("Scroll trace", "Wheel"),
+                                        ("Zoom both axes", "Ctrl+wheel / Pinch"),
+                                        ("Horizontal zoom in / out", "Ctrl+Right / Ctrl+Left"),
+                                        ("Vertical zoom in / out", "Ctrl+Up / Ctrl+Down"),
+                                        ("Reset axis zoom", "Click X / Y percentage"),
+                                        ("Inspect metadata", "Click instruction / stage"),
+                                        ("Place marker", "Shift+click"),
+                                        ("Move marker", "Drag marker"),
+                                        ("Remove marker", "Hover marker + Delete"),
+                                        ("Clear markers", "Inspector → Clear markers"),
+                                        ("Toggle overview", "M"),
+                                        ("Jump to pipeline row", "Click / drag overview"),
+                                        ("Resize overlay", "Drag panel edge"),
+                                        ("Expand / compact overlay", "Click > / <"),
+                                    ] {
+                                        ui.label(egui::RichText::new(feature).color(MUTED));
+                                        ui.label(
+                                            egui::RichText::new(control)
+                                                .font(bold_font(14.0))
+                                                .color(TEXT),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        });
                 });
         }
         ctx.request_repaint_after(Duration::from_millis(33));
