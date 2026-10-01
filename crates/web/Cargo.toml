@@ -1,0 +1,25 @@
+[package]
+name = "xonata-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xonata-core = { path = "../core" }
+xonata-app = { path = "../app" }
+eframe.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["HtmlCanvasElement", "File", "Blob", "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "ErrorEvent", "Event", "CustomEvent", "CustomEventInit", "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "FileList", "DragEvent", "DataTransfer", "EventTarget", "Storage", "MediaQueryList", "Node"] }
+async-trait = "0.1"
+
+[lints]
+workspace = true

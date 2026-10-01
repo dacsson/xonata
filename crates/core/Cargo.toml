@@ -1,0 +1,35 @@
+[package]
+name = "xonata-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait = "0.1"
+memchr = "2"
+regex = "1"
+postcard = { version = "1", features = ["alloc"] }
+lz4_flex = "0.11"
+lru = "0.14"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+ruzstd = "0.8"
+tracing = "0.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3"
+
+[dev-dependencies]
+futures-lite = "2"
+proptest = "1"
+criterion = "0.5"
+
+[[bench]]
+name = "engine"
+harness = false
+
+[lints]
+workspace = true

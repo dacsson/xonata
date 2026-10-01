@@ -1,0 +1,82 @@
+name: GitHub Pages
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+
+      - name: Install matching wasm-bindgen CLI
+        run: |
+          cargo generate-lockfile
+          xonata_bindgen_version="$(python3 -c 'import pathlib, tomllib; packages = tomllib.loads(pathlib.Path("Cargo.lock").read_text())["package"]; print(next(p["version"] for p in packages if p["name"] == "wasm-bindgen"))')"
+          cargo install wasm-bindgen-cli --version "$xonata_bindgen_version" --locked
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Check formatting and core behavior
+        run: |
+          cargo fmt --all -- --check
+          cargo test -p xonata-core -p xonata-view --locked
+          cargo clippy -p xonata-web --target wasm32-unknown-unknown --locked -- -D warnings
+
+      - name: Build Pages site
+        run: bash scripts/build-pages.sh
+
+      - name: Check project-subpath loading and trace search
+        env:
+          XONATA_WEB_ROOT: target/pages
+          XONATA_BASE_PATH: /xonata/
+          XONATA_CHROMIUM: google-chrome
+        run: node scripts/browser-smoke.mjs
+
+      - name: Check embedding example under project subpath
+        env:
+          XONATA_WEB_ROOT: target/pages
+          XONATA_BASE_PATH: /xonata/
+          XONATA_ENTRY_PAGE: embed-example.html
+          XONATA_CHROMIUM: google-chrome
+        run: node scripts/browser-smoke.mjs
+
+      - name: Upload static site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/pages
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

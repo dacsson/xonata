@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Xonata embedding example</title>
+<style>body{font-family:ui-monospace,monospace;background:#13171d;color:#dae2eb;margin:0;padding:24px}canvas{width:100%;height:80vh;background:#13171d;border:1px solid #38434f}</style></head>
+<body>
+  <h1>Embedded pipeline viewer</h1>
+  <p>The viewer mounts into a canvas in an ordinary web page. Open a local Kanata trace using its toolbar.</p>
+  <canvas id="pipeline" tabindex="0"></canvas>
+  <script type="module">
+    import init, { WebHandle } from './pkg/xonata_web.js';
+    await init();
+    const viewer = new WebHandle();
+    await viewer.start(document.getElementById('pipeline'));
+    window.viewer = viewer;
+    window.xonata = viewer;
+  </script>
+</body>
+</html>
