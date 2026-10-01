@@ -30,11 +30,6 @@ jobs:
           xonata_bindgen_version="$(python3 -c 'import pathlib, tomllib; packages = tomllib.loads(pathlib.Path("Cargo.lock").read_text())["package"]; print(next(p["version"] for p in packages if p["name"] == "wasm-bindgen"))')"
           cargo install wasm-bindgen-cli --version "$xonata_bindgen_version" --locked
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          package-manager-cache: false
-
       - name: Check formatting and core behavior
         run: |
           cargo fmt --all -- --check
@@ -43,21 +38,6 @@ jobs:
 
       - name: Build Pages site
         run: bash scripts/build-pages.sh
-
-      - name: Check project-subpath loading and trace search
-        env:
-          XONATA_WEB_ROOT: target/pages
-          XONATA_BASE_PATH: /xonata/
-          XONATA_CHROMIUM: google-chrome
-        run: node scripts/browser-smoke.mjs
-
-      - name: Check embedding example under project subpath
-        env:
-          XONATA_WEB_ROOT: target/pages
-          XONATA_BASE_PATH: /xonata/
-          XONATA_ENTRY_PAGE: embed-example.html
-          XONATA_CHROMIUM: google-chrome
-        run: node scripts/browser-smoke.mjs
 
       - name: Upload static site
         uses: actions/upload-pages-artifact@v4

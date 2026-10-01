@@ -2,6 +2,8 @@
 
 A Rust viewer for Kanata v4 pipeline traces. Runs natively or in a browser through WebAssembly, without Electron. Browser traces stay local.
 
+![Xonata showing pipeline phases, disassembly, cycle-distance markers, and the whole-trace overview](doc/showcase.png)
+
 - **Explore several traces:** tabs and split view, independent cycle/row zoom, numbered cells for long phases, and a clickable whole-trace minimap.
 - **Find every match:** literal or regex search across disassembly and metadata, matching snippets, filters, and navigation to the first phase.
 - **Measure the pipeline:** draggable grid markers connected by cycle and pipeline-row distances.
@@ -30,18 +32,12 @@ python3 -m http.server 8000 --directory web
 
 Open <http://localhost:8000/>. For integration, see [the embedding example](web/embed-example.html): `WebHandle` exposes `start(canvas)`, `open_file(file)`, `navigate(traceId, decimalOpId)`, and `destroy()`.
 
-## GitHub Pages
-
-In your GitHub repository, choose **Settings → Pages → Build and deployment → Source: GitHub Actions**. Commit this project, including [.github/workflows/pages.yml](.github/workflows/pages.yml), and push to the repository’s default branch. The workflow builds and checks the viewer, then publishes it; the deployment URL appears in the workflow run. It also supports manual runs from **Actions → GitHub Pages → Run workflow**. Pull requests build and test without publishing. See [GitHub’s Pages workflow guide](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
-
 For a local preview of the deployment artifact:
 
 ```sh
 bash scripts/build-pages.sh
 python3 -m http.server 8000 --directory target/pages
 ```
-
-The artifact contains only browser assets and the font license. Generated files and local traces stay out of Git.
 
 ## Controls
 

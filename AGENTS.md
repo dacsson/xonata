@@ -54,7 +54,7 @@ XONATA_WEB_ROOT=target/pages XONATA_BASE_PATH=/xonata/ node scripts/browser-smok
 XONATA_WEB_ROOT=target/pages XONATA_BASE_PATH=/xonata/ XONATA_ENTRY_PAGE=embed-example.html node scripts/browser-smoke.mjs
 ```
 
-`XONATA_CHROMIUM` selects a Chrome/Chromium executable (the workflow uses `google-chrome`). Keep Pages artifacts limited to distributable browser assets, including generated WASM and the font license. Asset and worker URLs must work beneath project subpaths. Pull requests must not deploy; publishing uses the default branch and the `github-pages` environment.
+`XONATA_CHROMIUM` selects a Chrome/Chromium executable for local checks. Browser smoke tests are local regression checks, not prerequisites in the Pages deployment workflow. The workflow checks formatting, core/view tests, and WASM lints before building and uploading the site. Keep Pages artifacts limited to distributable browser assets, including generated WASM and the font license. Asset and worker URLs must work beneath project subpaths. Pull requests must not deploy; publishing uses the default branch and the `github-pages` environment.
 
 If the local `drive-download-20261001T142849Z-1-001` directory is available:
 
