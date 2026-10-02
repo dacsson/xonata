@@ -20,6 +20,7 @@ const BORDER: Color32 = Color32::from_rgb(56, 67, 79);
 const TEXT: Color32 = Color32::from_rgb(218, 226, 235);
 const MUTED: Color32 = Color32::from_rgb(143, 159, 174);
 const ACCENT: Color32 = Color32::from_rgb(104, 183, 187);
+const FLUSHED_OPACITY: f32 = 0.22;
 const RULER_HEIGHT: f32 = 32.0;
 const COLORS: [Color32; 8] = [
     Color32::from_rgb(93, 165, 180),
@@ -1188,7 +1189,7 @@ fn draw_overview(ctx: &egui::Context, tab: &mut Tab, transport: &mut dyn Transpo
                 } else {
                     let color = COLORS[((index & 127).saturating_sub(1) as usize) % COLORS.len()];
                     if index & 128 != 0 {
-                        color.gamma_multiply(0.4)
+                        color.gamma_multiply(FLUSHED_OPACITY)
                     } else {
                         color
                     }
@@ -1464,7 +1465,13 @@ fn draw_disassembly(
                             egui::Align2::LEFT_CENTER,
                             format!("{:>5}  {label}", row.op.id),
                             egui::FontId::monospace((tab.view.row_height * 0.4).clamp(11.0, 15.0)),
-                            if selected { ACCENT } else { TEXT },
+                            if selected {
+                                ACCENT
+                            } else if row.op.flushed {
+                                TEXT.gamma_multiply(FLUSHED_OPACITY)
+                            } else {
+                                TEXT
+                            },
                         );
                 }
             }
@@ -1639,7 +1646,15 @@ fn draw_pipeline(
             }
             let name = symbol(&tab.info.symbols, stage.name);
             let color = COLORS[stage.name as usize % COLORS.len()];
-            painter.rect_filled(block, 0.0, color);
+            painter.rect_filled(
+                block,
+                0.0,
+                if op.flushed {
+                    color.gamma_multiply(FLUSHED_OPACITY)
+                } else {
+                    color
+                },
+            );
             let font = bold_font((h - 12.0).clamp(12.0, 17.0));
             let label = painter.layout_no_wrap(name.to_owned(), font.clone(), BG);
             let first_cell = Rect::from_min_max(
@@ -2521,6 +2536,37 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn flushed_instructions_should_be_much_dimmer_in_trace_and_disassembly() {
+        let (ctx, mut tab) = context_and_tab();
+        let colors = |output: egui::FullOutput| {
+            let mut slab = None;
+            let mut disassembly = None;
+            for shape in output.shapes {
+                match shape.shape {
+                    egui::epaint::Shape::Rect(rect)
+                        if rect.fill == COLORS[1]
+                            || rect.fill == COLORS[1].gamma_multiply(FLUSHED_OPACITY) =>
+                    {
+                        slab = Some(rect.fill.a());
+                    }
+                    egui::epaint::Shape::Text(text)
+                        if text.galley.job.text.ends_with("add x1,x2,x3") =>
+                    {
+                        disassembly = Some(text.galley.job.sections[0].format.color.a());
+                    }
+                    _ => {}
+                }
+            }
+            (slab.unwrap(), disassembly.unwrap())
+        };
+        let _ = render(&ctx, &mut tab, Vec::new());
+        let normal = colors(render(&ctx, &mut tab, Vec::new()));
+        tab.rows[0].op.flushed = true;
+        let flushed = colors(render(&ctx, &mut tab, Vec::new()));
+        assert!(flushed.0 < normal.0 / 3 && flushed.1 < normal.1 / 3);
     }
 
     #[test]
