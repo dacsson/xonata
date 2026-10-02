@@ -958,8 +958,11 @@ impl eframe::App for Viewer {
             ctx.animate_bool_with_time(egui::Id::new("modal-dim"), modal, 0.14)
         };
         if fade > 0.0 {
-            egui::Area::new(egui::Id::new("modal-backdrop"))
-                .order(egui::Order::Foreground)
+            // Areas can rise on click. Keep the backdrop above the canvas and its
+            // overlays, but in a lower order than every modal window.
+            let backdrop = egui::Area::new(egui::Id::new("modal-backdrop"))
+                .order(egui::Order::Middle)
+                .movable(false)
                 .fixed_pos(ctx.screen_rect().min)
                 .interactable(modal)
                 .show(ctx, |ui| {
@@ -971,6 +974,7 @@ impl eframe::App for Viewer {
                         Color32::from_black_alpha((125.0 * fade) as u8),
                     );
                 });
+            ctx.move_to_top(backdrop.response.layer_id);
         }
         if search_open
             && let Some(id) = self.active
@@ -1719,12 +1723,15 @@ fn draw_pipeline(
                     .galley(name_rect.min, label, BG);
             }
             if cursor.is_some_and(|pos| block.contains(pos)) {
+                let end = stage.end.unwrap_or(tab.info.last_cycle.saturating_add(1));
                 response.clone().on_hover_text(format!(
-                    "{} / {} · {}–{}\n{}\n{}",
+                    "{} / {} · {}–{}\nElapsed: {} cycles{}\n{}\n{}",
                     symbol(&tab.info.symbols, stage.lane),
                     name,
                     stage.start,
-                    stage.end.unwrap_or(tab.info.last_cycle),
+                    end,
+                    end.saturating_sub(stage.start),
+                    if stage.end.is_none() { " (open)" } else { "" },
                     stage.labels,
                     op.metadata(&tab.info.symbols)
                 ));
@@ -1957,24 +1964,27 @@ fn draw_details(ui: &mut egui::Ui, tab: &mut Tab) {
             InspectorSection::Phases => {
                 if let Some(op) = &tab.selected {
                     egui::Grid::new((tab.info.id, "phase-grid"))
-                        .num_columns(3)
+                        .num_columns(4)
                         .spacing([16.0, 8.0])
                         .show(ui, |ui| {
-                            for title in ["Phase", "Lane", "Cycles"] {
+                            for title in ["Phase", "Lane", "Cycles", "Elapsed"] {
                                 ui.label(egui::RichText::new(title).color(MUTED));
                             }
                             ui.end_row();
                             for stage in &op.stages {
+                                let end =
+                                    stage.end.unwrap_or(tab.info.last_cycle.saturating_add(1));
                                 ui.label(
                                     egui::RichText::new(symbol(&tab.info.symbols, stage.name))
                                         .font(bold_font(14.0)),
                                 )
                                 .on_hover_text(&stage.labels);
                                 ui.label(symbol(&tab.info.symbols, stage.lane));
+                                ui.label(format!("{}–{end}", stage.start));
                                 ui.label(format!(
-                                    "{}–{}",
-                                    stage.start,
-                                    stage.end.unwrap_or(tab.info.last_cycle)
+                                    "{} cycles{}",
+                                    end.saturating_sub(stage.start),
+                                    if stage.end.is_none() { " (open)" } else { "" },
                                 ));
                                 ui.end_row();
                             }
@@ -2535,6 +2545,123 @@ mod tests {
                     DEFAULT_ROW_HEIGHT * y_factor
                 )
             );
+        }
+    }
+
+    #[test]
+    fn animated_search_backdrop_should_not_cover_or_block_result_clicks() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.result_total = 1;
+        tab.search_done = true;
+        tab.results.insert(
+            0,
+            SearchHit {
+                op: tab.rows[0].op.clone(),
+                row: 5,
+                snippets: vec!["add x1,x2,x3".into()],
+            },
+        );
+        let mut viewer = Viewer {
+            transport: Box::<RecordingTransport>::default(),
+            tabs: vec![tab],
+            active: Some(1),
+            split: None,
+            error: None,
+            jump_text: String::new(),
+            jump_retired: false,
+            show_help: false,
+            prefs: Preferences::default(),
+        };
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut time = 0.0;
+        let mut render = |viewer: &mut Viewer, events| {
+            time += 0.05;
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 640.0))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(viewer, ctx, &mut frame),
+            )
+        };
+        for _ in 0..3 {
+            let _ = render(&mut viewer, Vec::new());
+        }
+        viewer.tabs[0].search_open = true;
+        for _ in 0..6 {
+            let _ = render(&mut viewer, Vec::new());
+        }
+        // A click in the dimmed background must not raise it over the dialog.
+        let outside = Pos2::new(20.0, 600.0);
+        for pressed in [true, false] {
+            let _ = render(
+                &mut viewer,
+                vec![
+                    egui::Event::PointerMoved(outside),
+                    egui::Event::PointerButton {
+                        pos: outside,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let output = render(&mut viewer, Vec::new());
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.job.text.contains("Op 1 · C100") => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("search result is rendered");
+        assert_eq!(
+            ctx.layer_id_at(pos),
+            Some(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("search-modal")
+            ))
+        );
+        for pressed in [true, false] {
+            let _ = render(
+                &mut viewer,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(viewer.tabs[0].current_result, Some(0));
+    }
+
+    #[test]
+    fn phase_inspector_should_report_elapsed_cycles_for_closed_and_open_phases() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.inspector_section = InspectorSection::Phases;
+        // Large absolute cycle numbers must not lose precision when computing duration.
+        let start = (1_u64 << 60) + 100;
+        tab.info.last_cycle = start + 10;
+        for (end, expected) in [(Some(start + 2), "2 cycles"), (None, "11 cycles (open)")] {
+            let mut op = tab.rows[0].op.clone();
+            op.stages[0].start = start;
+            op.stages[0].end = end;
+            tab.selected = Some(op);
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| draw_details(ui, &mut tab));
+            });
+            assert!(output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == expected)
+            }));
         }
     }
 
