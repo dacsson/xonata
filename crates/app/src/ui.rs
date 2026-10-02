@@ -1640,6 +1640,23 @@ fn draw_pipeline(
             let name = symbol(&tab.info.symbols, stage.name);
             let color = COLORS[stage.name as usize % COLORS.len()];
             painter.rect_filled(block, 0.0, color);
+            let font = bold_font((h - 12.0).clamp(12.0, 17.0));
+            let label = painter.layout_no_wrap(name.to_owned(), font.clone(), BG);
+            let first_cell = Rect::from_min_max(
+                Pos2::new(start + 1.0, block.top()),
+                Pos2::new(start + tab.view.cycle_width - 1.0, block.bottom()),
+            )
+            .intersect(block);
+            // Prefer the first cycle, but keep the name readable across the slab when
+            // zoom makes individual cycles too narrow. Measure the actual glyphs.
+            let name_area = if label.size().x + 8.0 <= first_cell.width() {
+                first_cell
+            } else {
+                block
+            };
+            let name_rect = (label.size().x + 4.0 <= name_area.width()
+                && label.size().y <= name_area.height())
+            .then(|| Rect::from_center_size(name_area.center(), label.size()));
             // Visit visible cycles only: a long phase must not cost work proportional to its duration.
             if tab.view.cycle_width >= 12.0 {
                 let visible_start = stage.start.max(tab.view.cycle_at(0.0));
@@ -1663,22 +1680,14 @@ fn draw_pipeline(
                             Stroke::new(0.7_f32, BG.gamma_multiply(0.28)),
                         );
                     }
-                    if cell.width() > 24.0 && cell.height() >= 22.0 {
-                        let text = if cycle == stage.start {
-                            name.to_owned()
-                        } else {
-                            (cycle - stage.start + 1).to_string()
-                        };
-                        let text_color = if cycle == stage.start {
-                            BG
-                        } else {
-                            BG.gamma_multiply(0.38)
-                        };
-                        let label = painter.layout_no_wrap(
-                            text,
-                            bold_font((h - 12.0).clamp(12.0, 17.0)),
-                            text_color,
-                        );
+                    if cycle > stage.start
+                        && cell.width() > 24.0
+                        && cell.height() >= 22.0
+                        && !name_rect.is_some_and(|name| name.expand(2.0).intersects(cell))
+                    {
+                        let text = (cycle - stage.start + 1).to_string();
+                        let text_color = BG.gamma_multiply(0.38);
+                        let label = painter.layout_no_wrap(text, font.clone(), text_color);
                         if label.size().x + 12.0 <= cell.width() {
                             painter.with_clip_rect(cell).galley(
                                 Pos2::new(left + 8.0, top + h * 0.5 - label.size().y * 0.5),
@@ -1688,6 +1697,11 @@ fn draw_pipeline(
                         }
                     }
                 }
+            }
+            if let Some(name_rect) = name_rect {
+                painter
+                    .with_clip_rect(block)
+                    .galley(name_rect.min, label, BG);
             }
             if cursor.is_some_and(|pos| block.contains(pos)) {
                 response.clone().on_hover_text(format!(
@@ -2506,6 +2520,48 @@ mod tests {
                     DEFAULT_ROW_HEIGHT * y_factor
                 )
             );
+        }
+    }
+
+    #[test]
+    fn phase_names_should_use_the_whole_slab_when_cycle_cells_are_too_narrow() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.sidebar = false;
+        tab.info.symbols[1] = "vE".into();
+        tab.rows[0].op.stages[0].end = Some(110);
+        for width in [32.0, 24.0, 12.0, 6.0] {
+            tab.view.cycle_width = width;
+            tab.view.row_height = 24.0;
+            let output = render(&ctx, &mut tab, Vec::new());
+            let labels: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.job.text == "vE" => Some(text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(labels.len(), 1, "cycle width {width}");
+            if width <= 12.0 {
+                let center = labels[0].pos.x + labels[0].galley.size().x * 0.5;
+                assert!((center - (tab.canvas_rect.unwrap().left() + width * 5.0)).abs() < 0.5);
+            }
+        }
+    }
+
+    #[test]
+    fn phase_names_should_hide_when_the_slab_is_too_narrow_or_short() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.sidebar = false;
+        tab.info.symbols[1] = "vE".into();
+        tab.rows[0].op.stages[0].end = Some(110);
+        for (width, height) in [(1.0, 32.0), (12.0, 8.0)] {
+            tab.view.cycle_width = width;
+            tab.view.row_height = height;
+            let output = render(&ctx, &mut tab, Vec::new());
+            assert!(!output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == "vE")
+            }));
         }
     }
 
