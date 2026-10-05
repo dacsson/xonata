@@ -3,5 +3,6 @@
 pub mod native;
 pub mod ui;
 
+mod comments;
 mod filter_builder;
 mod filters;

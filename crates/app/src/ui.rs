@@ -15,11 +15,11 @@ use xonata_core::{
 use xonata_view::{DEFAULT_CYCLE_WIDTH, DEFAULT_ROW_HEIGHT, Marker, Viewport};
 
 const BG: Color32 = Color32::from_rgb(19, 23, 29);
-const PANEL: Color32 = Color32::from_rgb(28, 34, 43);
-const BORDER: Color32 = Color32::from_rgb(56, 67, 79);
-const TEXT: Color32 = Color32::from_rgb(218, 226, 235);
-const MUTED: Color32 = Color32::from_rgb(143, 159, 174);
-const ACCENT: Color32 = Color32::from_rgb(104, 183, 187);
+pub(super) const PANEL: Color32 = Color32::from_rgb(28, 34, 43);
+pub(super) const BORDER: Color32 = Color32::from_rgb(56, 67, 79);
+pub(super) const TEXT: Color32 = Color32::from_rgb(218, 226, 235);
+pub(super) const MUTED: Color32 = Color32::from_rgb(143, 159, 174);
+pub(super) const ACCENT: Color32 = Color32::from_rgb(104, 183, 187);
 const FLUSHED_OPACITY: f32 = 0.22;
 const RULER_HEIGHT: f32 = 32.0;
 const COLORS: [Color32; 8] = [
@@ -102,6 +102,7 @@ struct Tab {
     hide_flushed: bool,
     selected: Option<Operation>,
     selected_row: Option<u64>,
+    comments: crate::comments::Comments,
     markers: Vec<Marker>,
     marker_drag: Option<usize>,
     wrap_result: Option<bool>,
@@ -143,6 +144,7 @@ impl Tab {
             hide_flushed: prefs.hide_flushed,
             selected: None,
             selected_row: None,
+            comments: crate::comments::Comments::default(),
             markers: Vec::new(),
             marker_drag: None,
             wrap_result: None,
@@ -609,8 +611,9 @@ impl Viewer {
         self.tabs.iter_mut().find(|tab| tab.info.id == id)
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let typing = ctx.wants_keyboard_input();
-        let search = ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F))
+        let comment_editor = self.tabs.iter().any(|tab| tab.comments.editing());
+        let typing = ctx.wants_keyboard_input() || comment_editor;
+        let search = !comment_editor && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F))
             || (!typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)));
         let next = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::N));
         let previous = !typing && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::P));
@@ -621,6 +624,19 @@ impl Viewer {
                 .active
                 .and_then(|id| self.tabs.iter().find(|tab| tab.info.id == id))
                 .is_some_and(|tab| tab.search_open || tab.wrap_result.is_some());
+        let comment = canvas_shortcuts && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C));
+        let cancel_comment = ctx.input_mut(|i| {
+            if canvas_shortcuts
+                && self
+                    .active
+                    .and_then(|id| self.tabs.iter().find(|tab| tab.info.id == id))
+                    .is_some_and(|tab| tab.comments.placing)
+            {
+                i.consume_key(Modifiers::NONE, Key::Escape)
+            } else {
+                false
+            }
+        });
         let zoom_x_in =
             canvas_shortcuts && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::ArrowRight));
         let zoom_x_out =
@@ -647,6 +663,12 @@ impl Viewer {
         if let Some(id) = self.active {
             let transport = &mut *self.transport;
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.info.id == id) {
+                if comment {
+                    tab.comments.placing = !tab.comments.placing;
+                }
+                if cancel_comment {
+                    tab.comments.placing = false;
+                }
                 if zoom_x_in || zoom_x_out || zoom_y_in || zoom_y_out {
                     let anchor = tab.zoom_anchor();
                     tab.view.zoom_axes(
@@ -1047,7 +1069,9 @@ impl eframe::App for Viewer {
         {
             tab.wrap_result = None;
         }
-        let modal = self.error.is_some() || self.show_help || search_open || wrapping;
+        let comment_open = self.tabs.iter().any(|tab| tab.comments.editing());
+        let modal =
+            self.error.is_some() || self.show_help || search_open || wrapping || comment_open;
         let fade = if self.transport.reduced_motion() {
             if modal { 1.0 } else { 0.0 }
         } else {
@@ -1071,6 +1095,9 @@ impl eframe::App for Viewer {
                     );
                 });
             ctx.move_to_top(backdrop.response.layer_id);
+        }
+        for tab in &mut self.tabs {
+            tab.comments.show_editor(ctx, tab.info.id);
         }
         if search_open
             && let Some(id) = self.active
@@ -1173,6 +1200,13 @@ impl eframe::App for Viewer {
                                         ("Vertical zoom in / out", "Ctrl+Up / Ctrl+Down"),
                                         ("Reset axis zoom", "Click X / Y percentage"),
                                         ("Inspect metadata", "Click instruction / stage"),
+                                        ("Place comment", "C, then click trace"),
+                                        ("Edit comment", "Click its bubble"),
+                                        (
+                                            "Save / newline / cancel comment",
+                                            "Enter / Shift+Enter / Esc",
+                                        ),
+                                        ("Remove comment", "Hover bubble + Delete"),
                                         ("Place marker", "Shift+click"),
                                         ("Move marker", "Drag marker"),
                                         ("Remove marker", "Hover marker + Delete"),
@@ -1454,7 +1488,7 @@ fn draw_overview(ctx: &egui::Context, tab: &mut Tab, transport: &mut dyn Transpo
 }
 
 fn navigate_wheel(ui: &egui::Ui, tab: &mut Tab, rect: Rect, hovered: bool, horizontal: bool) {
-    if !hovered {
+    if !hovered || tab.comments.editing() {
         return;
     }
     let (zoom, scroll, pointer, modifiers) = ui.input(|input| {
@@ -1639,7 +1673,48 @@ fn draw_pipeline(
     let cursor = response
         .hover_pos()
         .or_else(|| response.interact_pointer_pos());
+    let label_clip = Rect::from_min_max(
+        Pos2::new(
+            rect.left() + if tab.sidebar { tab.sidebar_width } else { 0.0 },
+            rect.top(),
+        ),
+        Pos2::new(
+            rect.right()
+                - if tab.overview {
+                    tab.overview_width
+                } else {
+                    0.0
+                },
+            rect.bottom(),
+        ),
+    );
+    let bubbles = tab
+        .comments
+        .prepare(ui, &tab.view, rect, label_clip, tab.info.id);
+    let comment_placement = tab.comments.placing;
+    let comments_block = tab.comments.editing() || bubbles.hovered;
+    if comment_placement {
+        response
+            .clone()
+            .on_hover_cursor(egui::CursorIcon::Crosshair);
+    }
+    let placing_comment = !comments_block && comment_placement && response.clicked();
+    if placing_comment
+        && let Some(pos) = cursor
+        && label_clip.contains(pos)
+    {
+        tab.comments.begin(Marker {
+            cycle: tab
+                .view
+                .cycle_at(pos.x - rect.left() + tab.view.cycle_width * 0.5),
+            row: tab
+                .view
+                .row_at(pos.y - rect.top() + tab.view.row_height * 0.5),
+        });
+    }
     if response.hovered()
+        && !comments_block
+        && !comment_placement
         && !ui.ctx().wants_keyboard_input()
         && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete))
         && let Some(pos) = cursor
@@ -1661,20 +1736,22 @@ fn draw_pipeline(
             rect.top() + tab.view.y(marker.row),
         )
     };
-    let marker_clicked = response.clicked()
+    let marker_clicked = !comments_block
+        && !comment_placement
+        && response.clicked()
         && cursor.is_some_and(|pos| {
             tab.markers
                 .iter()
                 .any(|marker| marker_pos(*marker).distance(pos) <= 10.0)
         });
-    if response.drag_started() {
+    if response.drag_started() && !comments_block && !comment_placement {
         tab.marker_drag = ui.input(|i| i.pointer.press_origin()).and_then(|pos| {
             tab.markers
                 .iter()
                 .position(|marker| marker_pos(*marker).distance(pos) <= 10.0)
         });
     }
-    if response.dragged() {
+    if response.dragged() && !comments_block && !comment_placement {
         tab.auto_center = false;
         if let (Some(index), Some(pos)) = (tab.marker_drag, cursor) {
             tab.markers[index] = Marker {
@@ -1698,7 +1775,10 @@ fn draw_pipeline(
         tab.details = true;
         tab.inspector_section = InspectorSection::Markers;
     }
-    let placing_marker = response.clicked() && ui.input(|i| i.modifiers.shift);
+    let placing_marker = !comments_block
+        && !comment_placement
+        && response.clicked()
+        && ui.input(|i| i.modifiers.shift);
     if placing_marker
         && let Some(pos) = cursor
         && rect.contains(pos)
@@ -1828,7 +1908,10 @@ fn draw_pipeline(
                     .with_clip_rect(block)
                     .galley(name_rect.min, label, BG);
             }
-            if cursor.is_some_and(|pos| block.contains(pos)) {
+            if !comments_block
+                && !comment_placement
+                && cursor.is_some_and(|pos| block.contains(pos))
+            {
                 let end = stage.end.unwrap_or(tab.info.last_cycle.saturating_add(1));
                 response.clone().on_hover_text(format!(
                     "{} / {} · {}–{}\nElapsed: {} cycles{}\n{}\n{}",
@@ -1872,6 +1955,8 @@ fn draw_pipeline(
         }
     }
     if response.clicked()
+        && !comments_block
+        && !comment_placement
         && !placing_marker
         && !marker_clicked
         && clicked.is_none()
@@ -1890,21 +1975,6 @@ fn draw_pipeline(
         tab.inspector_section = InspectorSection::Metadata;
         tab.details = true;
     }
-    let label_clip = Rect::from_min_max(
-        Pos2::new(
-            rect.left() + if tab.sidebar { tab.sidebar_width } else { 0.0 },
-            rect.top(),
-        ),
-        Pos2::new(
-            rect.right()
-                - if tab.overview {
-                    tab.overview_width
-                } else {
-                    0.0
-                },
-            rect.bottom(),
-        ),
-    );
     tab.filters
         .drawings(ui, &tab.info, &tab.view, rect, label_clip, transport);
     for pair in tab.markers.windows(2) {
@@ -1944,6 +2014,16 @@ fn draw_pipeline(
             format!("M{}", index + 1),
             egui::FontId::monospace(12.0),
             TEXT,
+        );
+    }
+    bubbles.paint(&painter, label_clip);
+    if tab.comments.placing {
+        painter.with_clip_rect(label_clip).text(
+            label_clip.center_bottom() - Vec2::new(0.0, 16.0),
+            egui::Align2::CENTER_BOTTOM,
+            "Click trace to comment · Esc cancels",
+            egui::FontId::monospace(13.0),
+            ACCENT,
         );
     }
     if tab.rows.is_empty() && tab.info.count == 0 {
@@ -3057,6 +3137,104 @@ mod tests {
             assert!((block.width() - width * 2.0).abs() < 0.5);
             assert!((block.center().y - (canvas.top() + tab.view.row_center(5))).abs() < 0.5);
         }
+    }
+
+    #[test]
+    fn comment_placement_should_not_select_instructions_and_editor_should_block_zoom() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.sidebar = false;
+        let mut viewer = Viewer {
+            transport: Box::<RecordingTransport>::default(),
+            tabs: vec![tab],
+            active: Some(1),
+            split: None,
+            error: None,
+            jump_text: String::new(),
+            jump_retired: false,
+            show_help: false,
+            prefs: Preferences::default(),
+        };
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut render = |viewer: &mut Viewer, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 640.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(viewer, ctx, &mut frame),
+            )
+        };
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        for _ in 0..3 {
+            let _ = render(&mut viewer, Vec::new());
+        }
+        let _ = render(&mut viewer, vec![key(Key::C, Modifiers::NONE)]);
+        assert!(viewer.tabs[0].comments.placing);
+        let rows = trace_rows_rect(viewer.tabs[0].canvas_rect.unwrap());
+        let pos = rows.min + Vec2::new(72.0, viewer.tabs[0].view.row_center(5));
+        for pressed in [true, false] {
+            let _ = render(
+                &mut viewer,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!(viewer.tabs[0].comments.editing());
+        assert!(!viewer.tabs[0].comments.placing);
+        assert!(viewer.tabs[0].selected.is_none());
+        assert!(viewer.tabs[0].markers.is_empty());
+        for _ in 0..3 {
+            let _ = render(&mut viewer, Vec::new());
+        }
+        let old_zoom = (
+            viewer.tabs[0].view.cycle_width,
+            viewer.tabs[0].view.row_height,
+        );
+        let _ = render(
+            &mut viewer,
+            vec![
+                key(Key::ArrowRight, Modifiers::CTRL),
+                key(Key::ArrowUp, Modifiers::CTRL),
+                key(Key::F, Modifiers::CTRL),
+            ],
+        );
+        assert_eq!(
+            (
+                viewer.tabs[0].view.cycle_width,
+                viewer.tabs[0].view.row_height
+            ),
+            old_zoom
+        );
+        assert!(!viewer.tabs[0].search_open);
+        let _ = render(
+            &mut viewer,
+            vec![egui::Event::Paste("Important delay".into())],
+        );
+        let _ = render(&mut viewer, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert!(!viewer.tabs[0].comments.editing());
+        let output = render(&mut viewer, Vec::new());
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::Text(text) if text.galley.job.text == "Important delay")));
+        for _ in 0..3 {
+            let _ = render(&mut viewer, Vec::new());
+        }
+        let _ = render(&mut viewer, vec![key(Key::C, Modifiers::NONE)]);
+        let _ = render(&mut viewer, vec![key(Key::Escape, Modifiers::NONE)]);
+        assert!(!viewer.tabs[0].comments.placing);
     }
 
     #[test]

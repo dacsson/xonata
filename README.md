@@ -10,7 +10,7 @@ A Rust viewer for Kanata v4 pipeline traces. Runs natively or in a browser throu
 - **Explore several traces:** tabs and split view, independent cycle/row zoom, numbered cells for long phases, and a clickable whole-trace minimap.
 - **Find every match:** literal or regex search across disassembly and metadata, matching snippets, filters, and navigation to the first phase.
 - **Analyze phase relationships:** general constraints, signed source–target gaps, click-to-jump results, and numbered translucent interval drawings.
-- **Measure the pipeline:** draggable grid markers connected by cycle and pipeline-row distances.
+- **Measure and annotate:** draggable grid markers show cycle and row distances; comment bubbles point to specific trace locations.
 - **Keep the trace central:** resizable disassembly and inspector overlays, aligned rows, metadata tooltips, and a minimal monospace interface.
 - **Handle large logs:** worker-based parsing, paged temporary storage, and a bounded decoded-page cache.
 
@@ -54,12 +54,15 @@ python3 -m http.server 8000 --directory target/pages
 | Vertical zoom in / out | **Ctrl+Up / Ctrl+Down** |
 | Zoom both axes / pan / scroll | **Ctrl+wheel** or pinch / drag / wheel |
 | Place / move / remove marker | **Shift+click** / drag its dot / hover its dot and press **Delete** |
+| Place / edit comment | **C**, then click the trace / click its bubble |
+| Save / newline / cancel comment | **Enter / Shift+Enter / Esc** |
+| Remove comment | Hover its bubble and press **Delete**, or use **Delete** in its editor |
 | Toggle whole-trace overview | **M** or **Overview** in the header |
 | Hotkeys guide | **?** |
 
 The overview fits all pipeline rows and cycles into a full-height strip. Click or drag to jump to a row’s first phase; the white indicator tracks the current viewport. Drag its left edge to resize, use **> / <** to expand or compact it, or **×** to hide it.
 
-Shortcuts for letters and zoom are inactive while typing. **X/Y** percentages reset each zoom axis. Click a phase or disassembly row to inspect metadata. Drag the disassembly edge to resize it; **> / <** expands or compacts it. **Inspector → Markers** provides editing, **×** removal, and **Clear markers**. Markers last for the session. **View** contains split view, the flushed-operation filter, and jumps by operation or retired ID.
+Shortcuts for letters and zoom are inactive while typing. **X/Y** percentages reset each zoom axis. Click a phase or disassembly row to inspect metadata. Drag the disassembly edge to resize it; **> / <** expands or compacts it. **Inspector → Markers** provides editing, **×** removal, and **Clear markers**. Markers and comments last for the session and belong to their trace tab. Comments accept pasted text and follow the cycle/row grid during pan and zoom. Press **Esc** to cancel comment placement. **View** contains split view, the flushed-operation filter, and jumps by operation or retired ID.
 
 ## Phase and interval filters
 

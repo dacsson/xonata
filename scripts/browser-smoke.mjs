@@ -153,6 +153,38 @@ try {
     await call('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1});
     await new Promise(done => setTimeout(done, 120));
   }
+  // Place a comment through the shared UI, paste multiline text, and save with Enter.
+  await filterClick(458, 20); // Hide the inspector so the bubble is fully visible.
+  const selectionsBeforeComment = await call('Runtime.evaluate', {
+    expression: 'window.__selectionEvents.length', returnByValue: true,
+  });
+  await call('Input.dispatchKeyEvent', {type: 'keyDown', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67});
+  await call('Input.dispatchKeyEvent', {type: 'keyUp', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67});
+  await new Promise(done => setTimeout(done, 120));
+  await filterClick(418, 138);
+  await new Promise(done => setTimeout(done, 200));
+  await call('Browser.grantPermissions', {
+    origin: `http://127.0.0.1:${port}`, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+  });
+  const clipboard = await call('Runtime.evaluate', {
+    expression: 'navigator.clipboard.writeText("Pipeline delay\\nCheck the next vector instruction.")',
+    awaitPromise: true, userGesture: true,
+  });
+  if (clipboard.exceptionDetails) throw new Error('Could not prepare the comment paste regression');
+  await call('Input.dispatchKeyEvent', {type: 'keyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2});
+  await call('Input.dispatchKeyEvent', {type: 'keyUp', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2});
+  await new Promise(done => setTimeout(done, 120));
+  await call('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+  await call('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+  await new Promise(done => setTimeout(done, 200));
+  const selectionsAfterComment = await call('Runtime.evaluate', {
+    expression: 'window.__selectionEvents.length', returnByValue: true,
+  });
+  if (selectionsAfterComment.result.value !== selectionsBeforeComment.result.value) {
+    throw new Error('Comment placement selected an instruction instead of annotating the trace');
+  }
+  const commentScreenshot = await call('Page.captureScreenshot', {format: 'png'});
+  await writeFile('target/browser-comment.png', Buffer.from(commentScreenshot.data, 'base64'));
   async function filterCheck(form, trace, expected, firstSource, firstTarget, artifact) {
     // Give the resizable window room for its result list so automatic screen-edge
     // constraints do not move the controls between input events.

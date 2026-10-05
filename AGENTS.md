@@ -27,6 +27,7 @@ The existing viewer at `~/Tools/Konata` is an optional local format reference; b
 - Build the whole-trace overview in bounded worker batches and cache its compact raster. Resizing must reuse the image, and navigation must resolve unfiltered rows.
 - Keep the canvas full-size beneath overlays. Disassembly and phase slabs must share row geometry under pan and independent zoom.
 - Use square corners and bundled monospace fonts. Phase names should stand out from dimmer continuation numbers. Preserve font licenses in distributed builds.
+- Comments are session-only per-tab text anchored to cycle/row grid points. Render bounded previews for visible anchors, keep full text editable, and block canvas shortcuts while the comment editor is open.
 - Markers are session-only cycle/row grid points. Connect consecutive markers and report absolute cycle and row differences. Query-generated filter rectangles are permitted as session-only drawings; do not restore the old manual highlighting feature.
 - Keep native and browser controls consistent, and update both README controls and the `?` guide when changing shortcuts. Text editing and modal dialogs must not trigger canvas zoom shortcuts.
 - Avoid native-only APIs in shared WASM paths; use egui input time for UI timing. Preserve browser `WebHandle` APIs and host events when changing transport behavior.
