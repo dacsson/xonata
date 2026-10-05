@@ -5,12 +5,12 @@
 
 A Rust viewer for Kanata v4 pipeline traces. Runs natively or in a browser through WebAssembly, without Electron. Browser traces stay local.
 
-![Xonata showing pipeline phases, disassembly, cycle-distance markers, and the whole-trace overview](doc/showcase.png)
+![Showacase baby!](doc/showcase2.png)
 
-- **Explore several traces:** tabs and split view, independent cycle/row zoom, numbered cells for long phases, and a clickable whole-trace minimap.
+- **Explore several traces:** tabs and split view, independent cycle/row zoom, numbered cells for long phases, and a clickable whole-trace minimap like in VSCode.
 - **Find every match:** literal or regex search across disassembly and metadata, matching snippets, filters, and navigation to the first phase.
-- **Analyze phase relationships:** general constraints, signed source–target gaps, click-to-jump results, and numbered translucent interval drawings.
-- **Measure and annotate:** draggable grid markers show cycle and row distances; comment bubbles point to specific trace locations.
+- **Analyze phase relationships:** Find stalls and longest phases by elaborate filters with visual showcase.
+- **Measure and annotate:** draggable grid markers show cycle and row distances, your comment bubbles point to specific trace locations.
 - **Keep the trace central:** resizable disassembly and inspector overlays, aligned rows, metadata tooltips, and a minimal monospace interface.
 - **Handle large logs:** worker-based parsing, paged temporary storage, and a bounded decoded-page cache.
 
