@@ -83,9 +83,12 @@ try {
       const canvas=document.querySelector('canvas');
       window.__selectionEvents = [];
       canvas.addEventListener('xonata:selection', e => window.__selectionEvents.push(e.detail));
+      window.__filterEvents = [];
+      for (const type of ['xonata:filter_suggestions', 'xonata:filter_progress', 'xonata:filter_results', 'xonata:filter_sort_progress', 'xonata:filter_sorted_results', 'xonata:filter_drawn', 'xonata:filter_drawing', 'xonata:filter_error'])
+        canvas.addEventListener(type, e => window.__filterEvents.push({...JSON.parse(e.detail), type}));
       for (const type of ['xonata:trace','xonata:error','xonata:progress'])
         canvas.addEventListener(type, e=>events.push({type, detail:e.detail}));
-      const file=new File(['Kanata\\t0004\\nC=\\t100\\nI\\t0\\t0\\t0\\nL\\t0\\t0\\tadd x1,x2,x3\\nS\\t0\\t0\\tF\\nC\\t1\\nR\\t0\\t0\\t0\\n'], 'smoke.kanata');
+      const file=new File(['Kanata\\t0004\\nC=\\t100\\nI\\t0\\t0\\t0\\nL\\t0\\t0\\tadd x1,x2,x3\\nS\\t0\\t0\\tF\\nC\\t1\\nS\\t0\\t0\\tX\\nC\\t1\\nR\\t0\\t0\\t0\\n'], 'smoke.kanata');
       window.xonata.open_file(file);
       for (let i=0; i<100 && !events.some(e=>e.type==='xonata:trace' && JSON.parse(e.detail).info.complete); i++) await new Promise(r=>setTimeout(r,100));
       return {events, loading:document.querySelector('#loading')?.textContent ?? null};
@@ -142,6 +145,192 @@ try {
   await call('Input.dispatchMouseEvent', {type: 'mouseMoved', x: 600, y: 500});
   const zoomScreenshot = await call('Page.captureScreenshot', {format: 'png'});
   await writeFile('target/browser-zoom.png', Buffer.from(zoomScreenshot.data, 'base64'));
+  // Exercise the shared egui filter controls, including actual result clicks and drawings.
+  async function filterClick(x, y) {
+    await call('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y});
+    await call('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1});
+    await new Promise(done => setTimeout(done, 40));
+    await call('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1});
+    await new Promise(done => setTimeout(done, 120));
+  }
+  async function filterCheck(form, trace, expected, firstSource, firstTarget, artifact) {
+    // Give the resizable window room for its result list so automatic screen-edge
+    // constraints do not move the controls between input events.
+    await call('Emulation.setDeviceMetricsOverride', {width: 1100, height: 900, deviceScaleFactor: 1, mobile: false});
+    await new Promise(done => setTimeout(done, 300));
+    const size = (await call('Runtime.evaluate', {
+      expression: '(() => { const r = document.querySelector("canvas").getBoundingClientRect(); return {width:r.width,height:r.height,x:r.left,y:r.top}; })()', returnByValue: true,
+    })).result.value;
+    canvasOffset = {x: size.x, y: size.y};
+    const left = Math.max(size.width - 650, 0);
+    const top = Math.min(133, size.height - 347);
+    await filterClick(260, 20);
+    async function fill(x, y, text) {
+      await filterClick(x, y);
+      await call('Input.dispatchKeyEvent', {type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2});
+      await call('Input.dispatchKeyEvent', {type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2});
+      await call('Input.insertText', {text});
+      await new Promise(done => setTimeout(done, 150));
+    }
+    if (form.interval) {
+      await filterClick(left + 130, top + 88);
+      await filterClick(left + 160, top + 150);
+      await fill(left + 300, top + 151, form.source);
+      await fill(left + 300, top + 185, form.phase);
+      await fill(left + 300, top + 251, form.metadata);
+      await fill(left + 300, top + 351, form.target);
+      await fill(left + 300, top + 385, form.phase);
+    } else {
+      // Choose a discovered phase rather than entering any filter syntax.
+      await filterClick(left + 585, top + 185);
+      await new Promise(done => setTimeout(done, 500));
+      const suggestions = (await call('Runtime.evaluate', {
+        expression: `window.__filterEvents.filter(e=>e.type==='xonata:filter_suggestions' && e.trace===${trace} && e.field==='phase')`, returnByValue: true,
+      })).result.value;
+      if (!suggestions.some(e => e.values.includes(form.phase))) throw new Error('Trace phase suggestions failed: ' + JSON.stringify(suggestions));
+      const choices = await call('Page.captureScreenshot', {format: 'png'});
+      await writeFile('target/browser-filter-suggestions.png', Buffer.from(choices.data, 'base64'));
+      await filterClick(left + 400, top + 245);
+    }
+    const builder = await call('Page.captureScreenshot', {format: 'png'});
+    await writeFile('target/browser-filter-builder.png', Buffer.from(builder.data, 'base64'));
+    await filterClick(left + 27, top + (form.interval ? 454 : 375));
+    if (form.interval) {
+      const defaults = await call('Runtime.evaluate', {
+        expression: `(async()=>{for(let i=0;i<300;i++){const e=window.__filterEvents.filter(e=>e.trace===${trace} && e.type==='xonata:filter_progress' && e.done).at(-1);if(e)return e;await new Promise(r=>setTimeout(r,100));}throw new Error('Default delay filter timed out');})()`, awaitPromise: true, returnByValue: true,
+      });
+      if (defaults.exceptionDetails || defaults.result.value?.total !== '0') throw new Error('Default filter must exclude negative gaps: ' + JSON.stringify(defaults));
+      await filterClick(left + 36, top + 50);
+      await filterClick(left + 440, top + 88);
+      const kindMenu = await call('Page.captureScreenshot', {format: 'png'});
+      await writeFile('target/browser-filter-result-kind.png', Buffer.from(kindMenu.data, 'base64'));
+      await filterClick(left + 430, top + 160);
+      const overlaps = await call('Page.captureScreenshot', {format: 'png'});
+      await writeFile('target/browser-filter-overlap-builder.png', Buffer.from(overlaps.data, 'base64'));
+      await filterClick(left + 27, top + 454);
+    }
+    const filterWindow = await call('Page.captureScreenshot', {format: 'png'});
+    await writeFile('target/browser-filter-results.png', Buffer.from(filterWindow.data, 'base64'));
+    const events = (await call('Runtime.evaluate', {
+      expression: `(async () => {
+        for (let i=0; i<300; i++) {
+          const e=window.__filterEvents.filter(e=>e.trace===${trace});
+          if(e.some(e=>e.type==='xonata:filter_error')) throw new Error(JSON.stringify(e));
+          if(e.some(e=>e.type==='xonata:filter_progress' && e.done && e.total==='${expected}') && e.some(e=>e.type==='xonata:filter_results')) return e;
+          await new Promise(r=>setTimeout(r,100));
+        }
+        throw new Error('Filter timed out: '+JSON.stringify(window.__filterEvents.filter(e=>e.type==='xonata:filter_error' || (e.type==='xonata:filter_progress' && e.done)).slice(-8)));
+      })()`, awaitPromise: true, returnByValue: true,
+    }));
+    if (events.exceptionDetails || !Array.isArray(events.result.value)) throw new Error('Filter scan failed: ' + JSON.stringify({size, left, top, events}));
+    const completed = events.result.value.filter(e => e.type === 'xonata:filter_progress' && e.done).at(-1);
+    const hits = events.result.value?.filter(e => e.type === 'xonata:filter_results').flatMap(e => e.hits);
+    if (events.exceptionDetails || completed?.total !== String(expected) || hits?.[0]?.source.op !== String(firstSource)
+        || (firstTarget !== undefined && hits[0].target?.op !== String(firstTarget))) {
+      throw new Error('Filter results failed: ' + JSON.stringify(events));
+    }
+    if (firstTarget !== undefined && !hits.every(hit => BigInt(hit.elapsed) < 0n)) throw new Error('Expected signed overlap gaps');
+    // Sorting uses the whole worker result set and retains stable result IDs.
+    const originalHits = [...new Map(hits.map(hit => [hit.index, hit])).values()];
+    let fullHits;
+    for (const descending of [true, false, true]) {
+      const mark = (await call('Runtime.evaluate', {expression: 'window.__filterEvents.length', returnByValue: true})).result.value;
+      await filterClick(left + 530, top + 150);
+      const sorted = await call('Runtime.evaluate', {
+        expression: `(async()=>{
+          for(let i=0;i<300;i++) {
+            const events=window.__filterEvents.slice(${mark}).filter(e=>e.trace===${trace});
+            const done=events.find(e=>e.type==='xonata:filter_sort_progress' && e.done);
+            const page=events.find(e=>e.type==='xonata:filter_sorted_results' && e.revision===done?.revision && e.start==='0');
+            if(page)return page.hits;
+            await new Promise(r=>setTimeout(r,100));
+          }
+          throw new Error('Elapsed sort timed out');
+        })()`, awaitPromise: true, returnByValue: true,
+      });
+      if(sorted.exceptionDetails || sorted.result.value?.length !== expected) {
+        throw new Error('Elapsed sort did not include every result: '+JSON.stringify(sorted.exceptionDetails ?? sorted.result.value?.length));
+      }
+      fullHits ??= sorted.result.value;
+      if(!originalHits.every(hit=>fullHits.some(found=>found.index===hit.index && found.elapsed===hit.elapsed))) throw new Error('Sorting changed original results');
+      const ordered = fullHits.toSorted((a,b) => {
+        const x=BigInt(a.elapsed), y=BigInt(b.elapsed);
+        if(x!==y)return (x<y?-1:1)*(descending?-1:1);
+        return BigInt(a.index)<BigInt(b.index)?-1:BigInt(a.index)>BigInt(b.index)?1:0;
+      });
+      if(sorted.exceptionDetails || JSON.stringify(sorted.result.value?.map(hit=>hit.index)) !== JSON.stringify(ordered.map(hit=>hit.index))) {
+        throw new Error('Elapsed sorting failed: '+JSON.stringify({descending,actual:sorted.result.value?.map(hit=>hit.index),expected:ordered.map(hit=>hit.index)}));
+      }
+    }
+    const before = (await call('Runtime.evaluate', {expression: 'window.__selectionEvents.length', returnByValue: true})).result.value;
+    await new Promise(done => setTimeout(done, 200));
+    const completedWindow = await call('Page.captureScreenshot', {format: 'png'});
+    await writeFile('target/browser-filter-completed.png', Buffer.from(completedWindow.data, 'base64'));
+    await filterClick(left + 150, top + 192);
+    const selected = (await call('Runtime.evaluate', {expression: `window.__selectionEvents.slice(${before})`, returnByValue: true})).result.value;
+    if (selected.length !== 1 || String(JSON.parse(selected[0]).op_id) !== String(firstSource)) throw new Error('Filter result navigation failed: ' + JSON.stringify(selected));
+    await filterClick(left + 275, top + 119);
+    await filterClick(left + 581, top + 16);
+    const drawn = await call('Runtime.evaluate', {
+      expression: `(async () => {
+        for(let i=0;i<100;i++) {
+          const e=window.__filterEvents.filter(e=>e.trace===${trace});
+          const drawing=e.filter(e=>e.type==='xonata:filter_drawing').at(-1);
+          if(e.some(e=>e.type==='xonata:filter_drawn') && drawing?.hits.some(hit=>hit.source.op==='${firstSource}')) return drawing;
+          await new Promise(r=>setTimeout(r,100));
+        }
+        throw new Error('Drawing did not reveal selected result: '+JSON.stringify(window.__filterEvents));
+      })()`, awaitPromise: true, returnByValue: true,
+    });
+    if (drawn.exceptionDetails || BigInt(drawn.result.value?.visible ?? 0) < 1n) throw new Error('Draw failed: ' + JSON.stringify(drawn));
+    await call('Input.dispatchMouseEvent', {type: 'mouseMoved', x: 350, y: size.height - 10});
+    const screenshot = await call('Page.captureScreenshot', {format: 'png'});
+    await writeFile('target/' + artifact, Buffer.from(screenshot.data, 'base64'));
+    await call('Emulation.clearDeviceMetricsOverride');
+    await new Promise(done => setTimeout(done, 300));
+    canvasOffset = (await call('Runtime.evaluate', {
+      expression: '(() => { const r=document.querySelector("canvas").getBoundingClientRect(); return {x:r.left,y:r.top}; })()', returnByValue: true,
+    })).result.value;
+    console.log('Filter query, elapsed sorting, navigation and drawing passed:', expected, 'results');
+  }
+  await filterCheck({phase: 'F'}, 1, 1, 0, undefined, 'browser-filter-drawing.png');
+  // Exercise optional exclusion through the browser worker and its real temporary
+  // storage, without changing the viewer's trace IDs used by the real-file checks.
+  const excluded = await call('Runtime.evaluate', {
+    expression: `(async()=>{
+      const worker=new Worker(new URL('worker.js',location.href),{type:'module'});
+      const events=[];
+      worker.onmessage=e=>events.push(JSON.parse(e.data));
+      async function wait(predicate) {
+        for(let i=0;i<200;i++) {
+          const error=events.find(e=>e.type==='error' || e.type==='filter_error');
+          if(error)throw new Error(JSON.stringify(error));
+          const found=events.find(predicate);if(found)return found;
+          await new Promise(r=>setTimeout(r,50));
+        }
+        throw new Error('Exclusion worker timed out');
+      }
+      try {
+        worker.postMessage({type:'open',id:91,file:new File(['Kanata\\t0004\\nC=\\t100\\nI\\t0\\t0\\t0\\nL\\t0\\t0\\tsource\\nS\\t0\\t0\\tF\\nC=\\t105\\nE\\t0\\t0\\tF\\nI\\t1\\t1\\t7\\nL\\t1\\t0\\tbarrier\\nL\\t1\\t1\\tPrefix FREE RQU resource=36 suffix\\nC=\\t110\\nS\\t1\\t0\\tX\\nC=\\t111\\nE\\t1\\t0\\tX\\nI\\t2\\t2\\t0\\nL\\t2\\t0\\ttarget\\nC=\\t120\\nS\\t2\\t0\\tE\\nC=\\t121\\nE\\t2\\t0\\tE\\nR\\t0\\t0\\t0\\nR\\t1\\t1\\t0\\nR\\t2\\t2\\t0\\n'],'exclude.kanata')});
+        await wait(e=>e.type==='info' && e.info.complete);
+        const base='from=F & instr=source -> to=E & instr=target; gap>=0';
+        const condition='phase=X & instr=barrier & meta_contains="rqu *=36"';
+        const queries=[base,base+'; exclude='+JSON.stringify(condition)+'; exclude_scope=rows',base+'; exclude='+JSON.stringify(condition)+'; exclude_scope=all',base+'; exclude='+JSON.stringify('phase=missing')+'; exclude_scope=rows',base];
+        const counts=[];
+        for(let i=0;i<queries.length;i++) {
+          worker.postMessage({type:'request',payload:JSON.stringify({type:'filter',trace:91,generation:i+1,text:queries[i],skip:'0'})});
+          counts.push((await wait(e=>e.type==='filter_progress' && e.generation===i+1 && e.done)).total);
+        }
+        worker.postMessage({type:'request',payload:JSON.stringify({type:'close',trace:91})});
+        // Opening a header-only trace acknowledges completion of the prior queued close.
+        worker.postMessage({type:'open',id:92,file:new File(['Kanata\\t0004\\n'],'cleanup.kanata')});
+        await wait(e=>e.type==='info' && e.info.id===92);
+        return counts;
+      } finally {worker.terminate();}
+    })()`, awaitPromise:true,returnByValue:true,
+  });
+  if(excluded.exceptionDetails || JSON.stringify(excluded.result.value)!==JSON.stringify(['1','0','0','1','1']))throw new Error('Browser exclusion failed: '+JSON.stringify(excluded));
+  console.log('Optional exclusion, cross-thread matching and both scopes passed in browser worker');
   if (process.argv.includes('--real')) {
     const real = await call('Runtime.evaluate', {
       expression: `(async () => {
@@ -278,6 +467,7 @@ try {
     await new Promise(done => setTimeout(done, 200));
     const expandedOverview = await call('Page.captureScreenshot', {format: 'png'});
     await writeFile('target/browser-overview-expanded.png', Buffer.from(expandedOverview.data, 'base64'));
+    await filterCheck({interval: true, phase: 'E', source: 'vfirst', target: 'vmsne', metadata: 'FREE RQU *=36'}, 4, 12, 5497, 5499, 'browser-filter-interval.png');
     console.log('Whole-trace overview navigation passed');
     console.log('vfirst browser search and n/p navigation passed:', vfirst.result.value.at(-1).total, 'matches');
     console.log('Real browser traces passed:', real.result.value.infos.filter(info => info.complete).map(info => `${info.name}: ${info.count}`).join(', '));

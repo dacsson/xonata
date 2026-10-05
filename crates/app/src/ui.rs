@@ -81,6 +81,7 @@ enum InspectorSection {
 }
 
 struct Tab {
+    filters: crate::filters::Filters,
     info: TraceInfo,
     view: Viewport,
     rows: Vec<Row>,
@@ -122,6 +123,7 @@ impl Tab {
     fn new(info: TraceInfo, prefs: &Preferences) -> Self {
         Self {
             info,
+            filters: crate::filters::Filters::default(),
             view: Viewport::default(),
             rows: Vec::new(),
             view_gen: 0,
@@ -517,6 +519,80 @@ impl Viewer {
                     self.transport.selection(trace, op);
                 }
             }
+            Event::FilterSelection {
+                trace,
+                generation,
+                hit,
+                operation,
+            } => {
+                let mut selection = None;
+                if let Some(tab) = self.tab_mut(trace)
+                    && tab.filters.generation == generation
+                    && tab.filters.selected == Some(hit.index)
+                    && let Ok(op) = serde_json::from_str::<Operation>(&operation)
+                {
+                    tab.auto_center = false;
+                    tab.hide_flushed = false;
+                    let inset = if tab.sidebar {
+                        tab.sidebar_width + 24.0
+                    } else {
+                        24.0
+                    };
+                    let first = if let Some(target) = &hit.target {
+                        let span = hit.source.cycle.abs_diff(target.cycle) as f64
+                            * tab.view.cycle_width as f64;
+                        if span
+                            < tab
+                                .canvas_rect
+                                .map_or(0.0, |r| (r.width() - inset - 24.0) as f64)
+                        {
+                            hit.source.cycle.min(target.cycle)
+                        } else {
+                            hit.source.cycle
+                        }
+                    } else {
+                        hit.source.start
+                    };
+                    tab.view.cycle = first;
+                    tab.view.cycle_fraction = 0.0;
+                    tab.view.pan(inset, 0.0);
+                    let top = hit.target.as_ref().map_or(hit.source.row, |t| {
+                        if t.row.abs_diff(hit.source.row).saturating_add(8) as f64
+                            * (tab.view.row_height as f64)
+                            < tab.canvas_rect.map_or(0.0, |r| r.height() as f64)
+                        {
+                            t.row.min(hit.source.row)
+                        } else {
+                            hit.source.row
+                        }
+                    });
+                    tab.view.row = top.saturating_sub(4) as f64;
+                    tab.selected_row = Some(hit.source.row);
+                    selection = Some(hit.source.op);
+                    tab.selected = Some(op);
+                    tab.last_view = None;
+                }
+                if let Some(op) = selection {
+                    self.transport.selection(trace, op);
+                }
+            }
+            event @ (Event::FilterSuggestions { trace, .. }
+            | Event::FilterProgress { trace, .. }
+            | Event::FilterResults { trace, .. }
+            | Event::FilterSortProgress { trace, .. }
+            | Event::SortedFilterResults { trace, .. }
+            | Event::FilterError { trace, .. }
+            | Event::FilterDrawn { trace, .. }
+            | Event::FilterDrawing { trace, .. }) => {
+                if let Some(tab) = self.tab_mut(trace) {
+                    if matches!(&event, Event::FilterDrawn { generation, .. } if *generation == tab.filters.generation)
+                    {
+                        tab.hide_flushed = false;
+                        tab.last_view = None;
+                    }
+                    tab.filters.ingest(event);
+                }
+            }
             Event::Error { trace, message } => {
                 if message.contains("search pattern") {
                     if let Some(tab) = self.tab_mut(trace) {
@@ -651,6 +727,19 @@ impl Viewer {
                     .clicked()
                 {
                     search = true;
+                }
+                let filters_active = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.info.id == id)
+                    .is_some_and(|t| t.filters.open);
+                if ui
+                    .selectable_label(filters_active, "Filters")
+                    .on_hover_text("Phase and interval constraints with result drawings")
+                    .clicked()
+                    && let Some(tab) = self.tab_mut(id)
+                {
+                    tab.filters.open = !tab.filters.open;
                 }
                 if ui.selectable_label(sidebar_active, "Disassembly").clicked() {
                     sidebar = true;
@@ -928,6 +1017,13 @@ impl eframe::App for Viewer {
             self.prefs.overview = tab.overview;
             self.prefs.overview_width = tab.overview_width;
         }
+        if let Some(id) = self.active
+            && let Some(tab) = self.tabs.iter_mut().find(|t| t.info.id == id)
+            && let Some(canvas) = tab.canvas_rect
+        {
+            tab.filters
+                .show(ctx, &tab.info, canvas, &mut *self.transport);
+        }
         let search_open = self.active.is_some_and(|id| {
             self.tabs
                 .iter()
@@ -1062,6 +1158,12 @@ impl eframe::App for Viewer {
                                     for (feature, control) in [
                                         ("Open trace", "Ctrl+O"),
                                         ("Search", "F / Ctrl+F"),
+                                        ("Filter builder / suggestions", "Filters → Query → ▾"),
+                                        (
+                                            "Sort results by elapsed cycles",
+                                            "Filters → Results → Elapsed cycles",
+                                        ),
+                                        ("Draw filter results", "Filters → Draw"),
                                         ("Next / previous match", "n / p"),
                                         ("Show this guide", "?"),
                                         ("Pan trace", "Drag"),
@@ -1526,6 +1628,10 @@ fn draw_pipeline(
 ) -> Rect {
     let (canvas, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let rect = trace_rows_rect(canvas);
+    if tab.filters.drawn.is_some() && tab.filters.drawing_visible && tab.hide_flushed {
+        tab.hide_flushed = false;
+        tab.last_view = None;
+    }
     tab.ensure_view(transport, rect.size());
     let painter = ui.painter_at(rect);
     ui.painter_at(canvas).rect_filled(canvas, 0.0, BG);
@@ -1784,6 +1890,23 @@ fn draw_pipeline(
         tab.inspector_section = InspectorSection::Metadata;
         tab.details = true;
     }
+    let label_clip = Rect::from_min_max(
+        Pos2::new(
+            rect.left() + if tab.sidebar { tab.sidebar_width } else { 0.0 },
+            rect.top(),
+        ),
+        Pos2::new(
+            rect.right()
+                - if tab.overview {
+                    tab.overview_width
+                } else {
+                    0.0
+                },
+            rect.bottom(),
+        ),
+    );
+    tab.filters
+        .drawings(ui, &tab.info, &tab.view, rect, label_clip, transport);
     for pair in tab.markers.windows(2) {
         let a = Pos2::new(
             rect.left() + tab.view.x(pair[0].cycle),
@@ -2545,6 +2668,394 @@ mod tests {
                     DEFAULT_ROW_HEIGHT * y_factor
                 )
             );
+        }
+    }
+
+    fn filter_hit(tab: &Tab, index: u64) -> xonata_core::filter::FilterHit {
+        let query = xonata_core::filter::FilterQuery::parse("phase=F").unwrap();
+        let source = query
+            .source
+            .endpoints(&tab.rows[0].op, tab.rows[0].index, &tab.info)
+            .0
+            .remove(0);
+        xonata_core::filter::FilterHit {
+            index,
+            elapsed: 2,
+            source,
+            target: None,
+        }
+    }
+
+    #[test]
+    fn graphical_filters_should_quote_user_text_and_default_to_nonnegative_gaps() {
+        let (_, mut tab) = context_and_tab();
+        let mut op = tab.rows[0].op.clone();
+        op.label = "add \"quoted\" & operands -> result;".into();
+        op.detail = "prefix Free RQU resource=36 suffix".into();
+        tab.filters.builder.source.phase = "F".into();
+        tab.filters.builder.source.instruction = op.label.clone();
+        tab.filters.builder.source.metadata = "rqu *=36".into();
+        tab.filters.builder.interval = true;
+        tab.filters.builder.target.phase = "F".into();
+        let query = xonata_core::filter::FilterQuery::parse(&tab.filters.builder.query()).unwrap();
+        let source = query.source.endpoints(&op, 5, &tab.info).0.remove(0);
+        let mut target = source.clone();
+        target.cycle = source.cycle - 1;
+        assert!(!query.accepts(&source, &target));
+        target.cycle = source.cycle;
+        assert!(query.accepts(&source, &target));
+        tab.filters.builder.kind = crate::filter_builder::ResultKind::Both;
+        let query = xonata_core::filter::FilterQuery::parse(&tab.filters.builder.query()).unwrap();
+        target.cycle = source.cycle - 1;
+        assert!(query.accepts(&source, &target));
+    }
+
+    #[test]
+    fn filter_window_should_keep_its_width_across_frames_and_sort_with_one_button() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.filters.open = true;
+        tab.filters.done = true;
+        tab.filters.total = 1;
+        tab.filters.results.insert(0, filter_hit(&tab, 7));
+        let mut transport = RecordingTransport::default();
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0));
+        let id = egui::Id::new((tab.info.id, "filters-window"));
+        let render = |tab: &mut Tab, transport: &mut RecordingTransport, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(canvas),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |_| {});
+                    tab.filters.show(ctx, &tab.info, canvas, transport);
+                },
+            )
+        };
+        for (results, exclusion) in [(false, false), (false, true), (true, true)] {
+            tab.filters.results_tab = results;
+            tab.filters.builder.interval = exclusion;
+            tab.filters.builder.exclude_enabled = exclusion;
+            for _ in 0..5 {
+                let _ = render(&mut tab, &mut transport, Vec::new());
+            }
+            let width = ctx.memory(|m| m.area_rect(id).unwrap().width());
+            assert!(width < 650.0, "initial window unexpectedly wide: {width}");
+            for _ in 0..100 {
+                let _ = render(&mut tab, &mut transport, Vec::new());
+                let current = ctx.memory(|m| m.area_rect(id).unwrap().width());
+                assert!(
+                    (current - width).abs() < 1.0,
+                    "window grew from {width} to {current}"
+                );
+            }
+        }
+        let original = ctx.memory(|m| m.area_rect(id).unwrap());
+        let corner = original.right_bottom() - Vec2::splat(3.0);
+        let resized_corner = corner + Vec2::new(100.0, 50.0);
+        for (pos, pressed) in [
+            (corner, true),
+            (resized_corner, true),
+            (resized_corner, false),
+        ] {
+            let _ = render(
+                &mut tab,
+                &mut transport,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        for _ in 0..5 {
+            let _ = render(&mut tab, &mut transport, Vec::new());
+        }
+        let resized = ctx.memory(|m| m.area_rect(id).unwrap());
+        assert!(
+            resized.width() > original.width() + 60.0,
+            "window remains manually resizable: {original:?} -> {resized:?}"
+        );
+        // Read button positions from the rendered UI, independent of font metrics.
+        for descending in [true, false] {
+            let output = render(&mut tab, &mut transport, Vec::new());
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text)
+                        if text.galley.job.text.starts_with("Elapsed cycles") =>
+                    {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .expect("single sort button visible");
+            for pressed in [true, false] {
+                let _ = render(
+                    &mut tab,
+                    &mut transport,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert_eq!(tab.filters.descending, Some(descending));
+            assert!(
+                matches!(transport.0.last(),Some(Request::FilterSort {descending:order,..}) if *order==descending)
+            );
+            tab.filters.ingest(Event::FilterSortProgress {
+                trace: tab.info.id,
+                generation: tab.filters.generation,
+                revision: tab.filters.result_revision,
+                total: 1,
+                progress: 1.0,
+                done: true,
+            });
+        }
+    }
+
+    #[test]
+    fn filter_result_window_should_align_columns_and_remain_clickable() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.filters.open = true;
+        tab.filters.results_tab = true;
+        tab.filters.generation = 1;
+        tab.filters.done = true;
+        tab.filters.total = 1;
+        let mut hit = filter_hit(&tab, 7);
+        hit.source.instruction.push_str(&" operand".repeat(30));
+        tab.filters.results.insert(0, hit);
+        let mut transport = RecordingTransport::default();
+        let mut render = |tab: &mut Tab, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 640.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |_| {});
+                    tab.filters.show(
+                        ctx,
+                        &tab.info,
+                        Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 640.0)),
+                        &mut transport,
+                    );
+                },
+            )
+        };
+        for _ in 0..3 {
+            let _ = render(&mut tab, Vec::new());
+        }
+        let output = render(&mut tab, Vec::new());
+        let column = |prefix: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.job.text.starts_with(prefix) => {
+                        Some((
+                            text.pos + text.galley.size() * 0.5,
+                            shape.clip_rect,
+                            text.galley.rows.len(),
+                            text.galley.elided,
+                        ))
+                    }
+                    _ => None,
+                })
+                .expect("filter result column is visible")
+        };
+        let instruction = column("add x1,x2,x3");
+        let endpoint = column("#8  Op 1 / F");
+        let elapsed = column("2 cycles");
+        assert!((instruction.0.y - endpoint.0.y).abs() < 0.01);
+        assert!((endpoint.0.y - elapsed.0.y).abs() < 0.01);
+        assert!(instruction.1.right() <= endpoint.1.left());
+        assert!(endpoint.1.right() <= elapsed.1.left());
+        assert_eq!(instruction.2, 1);
+        assert!(
+            instruction.3,
+            "long instruction must truncate within its column"
+        );
+        // Clicking either side of the row reveals the same stable result ID.
+        for pos in [instruction.0, endpoint.0] {
+            for pressed in [true, false] {
+                let _ = render(
+                    &mut tab,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        }
+        assert_eq!(tab.filters.selected, Some(7));
+        assert!(transport.0.iter().any(|r| matches!(
+            r,
+            Request::RevealFilter {
+                generation: 1,
+                index: 7,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn filter_navigation_should_reveal_the_endpoint_and_ignore_stale_selections() {
+        let (_, mut tab) = context_and_tab();
+        let mut hit = filter_hit(&tab, 0);
+        hit.source.cycle = (1_u64 << 60) + 17;
+        hit.source.start = hit.source.cycle;
+        hit.source.end = hit.source.cycle + 2;
+        tab.filters.generation = 2;
+        tab.filters.selected = Some(0);
+        tab.view.cycle_width = 37.0;
+        tab.view.row_height = 29.0;
+        let operation = serde_json::to_string(&tab.rows[0].op).unwrap();
+        let mut viewer = Viewer {
+            transport: Box::<RecordingTransport>::default(),
+            tabs: vec![tab],
+            active: Some(1),
+            split: None,
+            error: None,
+            jump_text: String::new(),
+            jump_retired: false,
+            show_help: false,
+            prefs: Preferences::default(),
+        };
+        let original = viewer.tabs[0].view.cycle;
+        viewer.ingest(Event::FilterSelection {
+            trace: 1,
+            generation: 1,
+            hit: hit.clone(),
+            operation: operation.clone(),
+        });
+        assert_eq!(viewer.tabs[0].view.cycle, original);
+        viewer.ingest(Event::FilterSelection {
+            trace: 1,
+            generation: 2,
+            hit: hit.clone(),
+            operation,
+        });
+        let tab = &viewer.tabs[0];
+        assert!((tab.view.x(hit.source.start) - tab.sidebar_width - 24.0).abs() < 0.01);
+        assert_eq!((tab.view.cycle_width, tab.view.row_height), (37.0, 29.0));
+        assert_eq!(tab.selected_row, Some(hit.source.row));
+    }
+
+    #[test]
+    fn filter_cache_should_ignore_stale_generations_and_keep_at_most_512_results() {
+        let (_, mut tab) = context_and_tab();
+        tab.filters.generation = 2;
+        let hit = filter_hit(&tab, 0);
+        tab.filters.ingest(Event::FilterResults {
+            trace: 1,
+            generation: 1,
+            start: 0,
+            hits: vec![hit.clone()],
+        });
+        assert!(tab.filters.results.is_empty());
+        for start in (0..1024).step_by(128) {
+            let hits = (start..start + 128)
+                .map(|index| {
+                    let mut hit = hit.clone();
+                    hit.index = index;
+                    hit
+                })
+                .collect();
+            tab.filters.ingest(Event::FilterResults {
+                trace: 1,
+                generation: 2,
+                start,
+                hits,
+            });
+        }
+        assert_eq!(tab.filters.results.len(), 512);
+        assert!(tab.filters.results.contains_key(&1023));
+        tab.filters.ingest(Event::FilterDrawn {
+            trace: 1,
+            generation: 2,
+            options: Default::default(),
+        });
+        tab.filters.ingest(Event::FilterDrawing {
+            trace: 1,
+            generation: 1,
+            request: 0,
+            visible: 1,
+            hits: vec![hit],
+        });
+        assert!(tab.filters.drawing_hits.is_empty());
+    }
+
+    #[test]
+    fn drawing_numbers_should_remain_visible_beside_the_disassembly_overlay() {
+        let (ctx, mut tab) = context_and_tab();
+        let mut hit = filter_hit(&tab, 0);
+        hit.source.start = tab.view.cycle;
+        hit.source.end = tab.view.cycle + 20;
+        tab.filters.generation = 1;
+        tab.filters.drawn = Some(1);
+        tab.filters.drawing_options.label = "example".into();
+        tab.filters.drawing_hits = vec![hit];
+        let output = render(&ctx, &mut tab, Vec::new());
+        let label = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text)
+                    if text.galley.job.text == "#1 · 2 cycles · example" =>
+                {
+                    Some((text.pos, shape.clip_rect))
+                }
+                _ => None,
+            })
+            .expect("numbered drawing label");
+        let canvas = trace_rows_rect(tab.canvas_rect.unwrap());
+        assert!(label.0.x >= canvas.left() + tab.sidebar_width);
+        assert!(label.1.left() >= canvas.left() + tab.sidebar_width);
+    }
+
+    #[test]
+    fn single_phase_drawings_should_follow_lane_geometry_after_pan_and_independent_zoom() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.sidebar = false;
+        tab.filters.generation = 1;
+        tab.filters.drawn = Some(1);
+        tab.filters.drawing_hits = vec![filter_hit(&tab, 0)];
+        let color = Color32::from_rgb(225, 187, 105).gamma_multiply(0.30);
+        for (width, height, row) in [(72.0, 44.0, 0.0), (36.0, 32.0, 2.35), (20.0, 26.0, 3.2)] {
+            tab.view.cycle_width = width;
+            tab.view.row_height = height;
+            tab.view.row = row;
+            let output = render(&ctx, &mut tab, Vec::new());
+            let block = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::epaint::Shape::Rect(r) if r.fill == color => Some(r.rect),
+                    _ => None,
+                })
+                .unwrap();
+            let canvas = trace_rows_rect(tab.canvas_rect.unwrap());
+            assert!((block.width() - width * 2.0).abs() < 0.5);
+            assert!((block.center().y - (canvas.top() + tab.view.row_center(5))).abs() < 0.5);
         }
     }
 

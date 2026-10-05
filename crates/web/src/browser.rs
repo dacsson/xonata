@@ -126,28 +126,28 @@ export async function pageWrite(trace, key, bytes) {
   table.put(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), s.prefix + trace + '/' + key);
   await done;
 }
-export async function pageRemove(trace, searchOnly) {
+export async function pageRemove(trace, prefix) {
   const s = await storage();
   if (s.type === 'opfs') {
-    if (!searchOnly) {
+    if (!prefix) {
       try { await s.session.removeEntry(String(trace), {recursive: true}); }
       catch (error) { if (error.name !== 'NotFoundError') throw error; }
     } else {
       try {
         const dir = await s.session.getDirectoryHandle(String(trace));
-        for await (const [name] of dir.entries()) if (name.startsWith('search-')) await dir.removeEntry(name);
+        for await (const [name] of dir.entries()) if (name.startsWith(prefix)) await dir.removeEntry(name);
       } catch (error) { if (error.name !== 'NotFoundError') throw error; }
     }
     return;
   }
   const {table, done} = transaction(s.db, 'readwrite');
-  const prefix = s.prefix + trace + '/' + (searchOnly ? 'search-' : '');
+  const keyPrefix = s.prefix + trace + '/' + prefix;
   await new Promise((resolve, reject) => {
     const cursor = table.openKeyCursor();
     cursor.onsuccess = () => {
       const item = cursor.result;
       if (!item) return resolve();
-      if (String(item.key).startsWith(prefix)) table.delete(item.key);
+      if (String(item.key).startsWith(keyPrefix)) table.delete(item.key);
       item.continue();
     };
     cursor.onerror = () => reject(cursor.error);
@@ -161,7 +161,7 @@ extern "C" {
     #[wasm_bindgen(js_name = pageWrite, catch)]
     async fn page_write(trace: u32, key: &str, bytes: &Uint8Array) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = pageRemove, catch)]
-    async fn page_remove(trace: u32, search_only: bool) -> Result<JsValue, JsValue>;
+    async fn page_remove(trace: u32, prefix: &str) -> Result<JsValue, JsValue>;
 }
 struct BrowserBacking;
 #[async_trait(?Send)]
@@ -177,11 +177,19 @@ impl BackingStore for BrowserBacking {
         Ok(())
     }
     async fn remove(&mut self, trace: u32) -> Result<(), StoreError> {
-        page_remove(trace, false).await.map_err(js_storage_error)?;
+        page_remove(trace, "").await.map_err(js_storage_error)?;
+        Ok(())
+    }
+    async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
+        page_remove(trace, &format!("filter-{generation}-"))
+            .await
+            .map_err(js_storage_error)?;
         Ok(())
     }
     async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError> {
-        page_remove(trace, true).await.map_err(js_storage_error)?;
+        page_remove(trace, "search-")
+            .await
+            .map_err(js_storage_error)?;
         Ok(())
     }
 }
@@ -300,6 +308,14 @@ impl BrowserTransport {
                     CoreEvent::Info { .. } => Some("xonata:trace"),
                     CoreEvent::SearchProgress { .. } => Some("xonata:progress"),
                     CoreEvent::Error { .. } => Some("xonata:error"),
+                    CoreEvent::FilterProgress { .. } => Some("xonata:filter_progress"),
+                    CoreEvent::FilterSuggestions { .. } => Some("xonata:filter_suggestions"),
+                    CoreEvent::FilterResults { .. } => Some("xonata:filter_results"),
+                    CoreEvent::FilterSortProgress { .. } => Some("xonata:filter_sort_progress"),
+                    CoreEvent::SortedFilterResults { .. } => Some("xonata:filter_sorted_results"),
+                    CoreEvent::FilterDrawn { .. } => Some("xonata:filter_drawn"),
+                    CoreEvent::FilterDrawing { .. } => Some("xonata:filter_drawing"),
+                    CoreEvent::FilterError { .. } => Some("xonata:filter_error"),
                     _ => None,
                 };
                 if let Some(name) = name {

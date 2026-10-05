@@ -5,6 +5,11 @@
 pub mod compression;
 /// Worker-owned trace engine.
 pub mod engine;
+/// General phase filtering and interval queries.
+pub mod filter;
+mod filter_engine;
+mod filter_exclusion;
+mod filter_suggestions;
 /// Trace models and worker messages.
 pub mod model;
 /// Incremental Kanata parser.

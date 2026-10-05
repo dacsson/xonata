@@ -144,7 +144,17 @@ fn request_trace(request: &Request) -> u32 {
         | Request::Results { trace, .. }
         | Request::Jump { trace, .. }
         | Request::JumpRow { trace, .. }
-        | Request::Overview { trace, .. } => *trace,
+        | Request::Overview { trace, .. }
+        | Request::Filter { trace, .. }
+        | Request::FilterSuggestions { trace, .. }
+        | Request::CancelFilter { trace, .. }
+        | Request::FilterResults { trace, .. }
+        | Request::FilterSort { trace, .. }
+        | Request::SortedFilterResults { trace, .. }
+        | Request::RevealFilter { trace, .. }
+        | Request::DrawFilter { trace, .. }
+        | Request::ClearFilterDrawing { trace }
+        | Request::FilterViewport { trace, .. } => *trace,
     }
 }
 fn load_file(

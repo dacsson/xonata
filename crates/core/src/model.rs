@@ -1,6 +1,24 @@
 //! Serializable trace records and bounded worker protocol.
 use serde::{Deserialize, Serialize};
 
+/// Trace values offered by the graphical filter builder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionField {
+    /// Disassembly excerpts.
+    Instruction,
+    /// Phase names.
+    Phase,
+    /// Lane names.
+    Lane,
+    /// Instruction and phase metadata lines.
+    Metadata,
+    /// Instruction metadata lines.
+    OperationMetadata,
+    /// Phase metadata lines.
+    PhaseMetadata,
+}
+
 /// One named pipeline interval. End is exclusive.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stage {
@@ -287,6 +305,111 @@ pub enum Request {
         /// Maximum results.
         count: u32,
     },
+    /// Discovers bounded suggestions after trace loading completes.
+    FilterSuggestions {
+        /// Trace ID.
+        trace: u32,
+        /// Independent suggestion generation.
+        generation: u32,
+        /// Values to discover.
+        field: SuggestionField,
+        /// Case-insensitive contains pattern, supporting wildcards.
+        text: String,
+    },
+    /// Runs a phase filter.
+    Filter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Textual filter expression.
+        text: String,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Matching target instructions to skip.
+        skip: u64,
+    },
+    /// Cancels the active scan while preserving the drawn generation.
+    CancelFilter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+    },
+    /// Sorts existing results by signed elapsed cycles on the worker.
+    FilterSort {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Independent result-view revision.
+        revision: u32,
+        /// Highest elapsed counts first when true; lowest first otherwise.
+        descending: bool,
+    },
+    /// Retrieves a bounded page from the elapsed-sorted result view.
+    SortedFilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Result-view revision.
+        revision: u32,
+        /// First position in the sorted list.
+        #[serde(with = "crate::filter::decimal_u64")]
+        start: u64,
+        /// Maximum page size.
+        count: u32,
+    },
+    /// Retrieves a bounded page of original compact filter results.
+    FilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// First result index.
+        start: u64,
+        /// Maximum page size.
+        count: u32,
+    },
+    /// Loads one source operation for exact filter-result navigation.
+    RevealFilter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Stable result index.
+        #[serde(with = "crate::filter::decimal_u64")]
+        index: u64,
+    },
+    /// Activates a completed filter result set for drawing.
+    DrawFilter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Optional drawing label override.
+        label: String,
+    },
+    /// Clears the drawn set without deleting an active query's results.
+    ClearFilterDrawing {
+        /// Trace ID.
+        trace: u32,
+    },
+    /// Requests bounded rectangles intersecting the viewport.
+    FilterViewport {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Viewport request generation.
+        request: u32,
+
+        /// Exact viewport bounds.
+        bounds: crate::filter::FilterBounds,
+        /// Selected result index as an exact decimal string.
+        selected: Option<String>,
+    },
     /// Finds an operation or retirement ID.
     Jump {
         /// Trace ID.
@@ -348,6 +471,124 @@ pub enum Event {
         start: u64,
         /// Results.
         hits: Vec<SearchHit>,
+    },
+    /// Progressive trace-backed filter suggestions.
+    FilterSuggestions {
+        /// Trace ID.
+        trace: u32,
+        /// Independent suggestion generation.
+        generation: u32,
+        /// Values discovered.
+        field: SuggestionField,
+        /// Up to 16 distinct matching trace values, at most 160 characters each.
+        values: Vec<String>,
+        /// Whether scanning has finished or the suggestion limit was reached.
+        done: bool,
+    },
+    /// Progress of phase filtering.
+    FilterProgress {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Original result count.
+        total: u64,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Unknown END endpoints skipped.
+        skipped: u64,
+
+        /// Fraction scanned.
+        progress: f32,
+        /// Whether scanning finished.
+        done: bool,
+        /// Validated drawing options.
+        options: crate::filter::DrawOptions,
+    },
+    /// Paged compact filter results.
+    FilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// First result index.
+        start: u64,
+        /// Bounded filter results.
+        hits: Vec<crate::filter::FilterHit>,
+    },
+    /// Progress of sorting existing results.
+    FilterSortProgress {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Result-view revision.
+        revision: u32,
+        /// Original result count.
+        #[serde(with = "crate::filter::decimal_u64")]
+        total: u64,
+        /// Fraction of the current sorting pass completed.
+        progress: f32,
+        /// Whether sorting is complete.
+        done: bool,
+    },
+    /// A page of elapsed-sorted hits retaining their original indexes.
+    SortedFilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Result-view revision.
+        revision: u32,
+        /// First position in the sorted list.
+        #[serde(with = "crate::filter::decimal_u64")]
+        start: u64,
+        /// Original result records.
+        hits: Vec<crate::filter::FilterHit>,
+    },
+    /// Filter-specific inline failure, rather than a global modal.
+    FilterError {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Inline error description.
+        message: String,
+    },
+    /// Exact selection requested by a filter result click.
+    FilterSelection {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Selected compact result.
+        hit: crate::filter::FilterHit,
+        /// Operation encoded as JSON text to retain integer precision through JS.
+        operation: String,
+    },
+    /// A completed result set has replaced the previous drawing set.
+    FilterDrawn {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Validated drawing options.
+        options: crate::filter::DrawOptions,
+    },
+    /// Viewport-intersecting rectangles, capped at 2,048.
+    FilterDrawing {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Viewport request generation.
+        request: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Total intersecting rectangles, including preview overflow.
+        visible: u64,
+        /// Bounded filter results.
+        hits: Vec<crate::filter::FilterHit>,
     },
     /// Navigation destination.
     Jump {

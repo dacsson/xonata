@@ -33,6 +33,8 @@ pub trait BackingStore {
     async fn write(&mut self, trace: u32, key: &str, bytes: &[u8]) -> Result<(), StoreError>;
     /// Removes all objects belonging to a trace.
     async fn remove(&mut self, trace: u32) -> Result<(), StoreError>;
+    /// Removes filter objects for one generation, independently of search.
+    async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError>;
     /// Removes search objects for a trace.
     async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError>;
 }
@@ -306,6 +308,41 @@ impl PageStore {
             None => Ok(Vec::new()),
         }
     }
+    /// Writes one bounded auxiliary filter index or result page.
+    pub async fn write_filter<T: Serialize>(
+        &mut self,
+        trace: u32,
+        generation: u32,
+        key: &str,
+        value: &T,
+    ) -> Result<(), StoreError> {
+        let bytes = postcard::to_allocvec(value).map_err(|e| StoreError::Codec(e.to_string()))?;
+        self.backing
+            .write(trace, &format!("filter-{generation}-{key}"), &bytes)
+            .await
+    }
+    /// Reads one bounded auxiliary filter page.
+    pub async fn read_filter<T: serde::de::DeserializeOwned + Default>(
+        &mut self,
+        trace: u32,
+        generation: u32,
+        key: &str,
+    ) -> Result<T, StoreError> {
+        match self
+            .backing
+            .read(trace, &format!("filter-{generation}-{key}"))
+            .await?
+        {
+            Some(bytes) => {
+                postcard::from_bytes(&bytes).map_err(|e| StoreError::Codec(e.to_string()))
+            }
+            None => Ok(T::default()),
+        }
+    }
+    /// Releases filter objects without removing operation or search pages.
+    pub async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
+        self.backing.clear_filter(trace, generation).await
+    }
     /// Clears disk-backed result indexes.
     pub async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError> {
         self.backing.clear_search(trace).await
@@ -370,6 +407,21 @@ impl BackingStore for NativeBacking {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(StoreError::Storage(e.to_string())),
         }
+    }
+    async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
+        if self.dir(trace).exists() {
+            let prefix = format!("filter-{generation}-");
+            for entry in std::fs::read_dir(self.dir(trace))
+                .map_err(|e| StoreError::Storage(e.to_string()))?
+            {
+                let entry = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    std::fs::remove_file(entry.path())
+                        .map_err(|e| StoreError::Storage(e.to_string()))?;
+                }
+            }
+        }
+        Ok(())
     }
     async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError> {
         if self.dir(trace).exists() {
