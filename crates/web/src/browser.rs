@@ -61,9 +61,24 @@ async function collectIdb(db) {
     });
   } catch (_) { /* Current session remains usable without collection. */ }
 }
+function sessionId(prefix) {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return prefix + c.randomUUID();
+  // Insecure contexts (plain http:// over an IP) expose crypto but not
+  // randomUUID. Fall back to getRandomValues, which is available there, so
+  // temporary storage still works without HTTPS.
+  if (c?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    c.getRandomValues(bytes);
+    let hex = '';
+    for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0');
+    return prefix + hex;
+  }
+  return prefix + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+}
 async function storage() {
   if (!storePromise) storePromise = (async () => {
-    const name = 'xonata-' + crypto.randomUUID();
+    const name = sessionId('xonata-');
     await holdSession(name);
     try {
       if (navigator.storage?.getDirectory) {
