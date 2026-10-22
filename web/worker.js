@@ -51,6 +51,8 @@ self.onmessage = ({ data }) => {
   if (data.type === 'open') {
     pending.add(data.id);
     void load(data.id, data.file);
+  } else if (data.type === 'analysis') {
+    void schedule(0, (engine) => engine.analysis(data.payload)).catch(() => {});
   } else if (data.type === 'request') {
     try {
       const request = JSON.parse(data.payload);

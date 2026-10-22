@@ -19,7 +19,7 @@ pub mod search;
 /// Bounded page cache and backing-store interface.
 pub mod storage;
 
-pub use engine::Engine;
+pub use engine::{AnalysisAction, AnalysisRequest, Engine};
 pub use model::*;
 pub use storage::{BackingStore, StoreError};
 

@@ -37,16 +37,35 @@ const COLORS: [Color32; 8] = [
 pub trait Transport {
     /// Opens one or more traces through the platform picker.
     fn open_dialog(&mut self);
+
     /// Sends a bounded worker request.
     fn request(&mut self, request: Request);
+
     /// Takes pending worker events without blocking a frame.
     fn poll(&mut self) -> Vec<Event>;
+
+    /// Sends an isolated analysis request without blocking the UI.
+    fn analysis(
+        &mut self,
+        _request: xonata_core::AnalysisRequest,
+        reply: crate::chat::AnalysisReply,
+    ) {
+        let _ = reply.send(Err("Analysis transport unavailable".into()));
+    }
+
+    /// Takes an explicit browser-host connection update, including clearing it.
+    fn agent_configuration(&mut self) -> Option<Option<crate::chat::AgentConfig>> {
+        None
+    }
+
     /// Notifies an embedding page about a selected instruction.
     fn selection(&mut self, _trace: u32, _op: u64) {}
+
     /// Whether the platform requests reduced animation.
     fn reduced_motion(&self) -> bool {
         false
     }
+
     /// Opens files dropped on a native window.
     #[cfg(not(target_arch = "wasm32"))]
     fn open_paths(&mut self, paths: Vec<PathBuf>);
@@ -61,6 +80,7 @@ struct Preferences {
     overview: bool,
     overview_width: f32,
 }
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -119,7 +139,9 @@ struct Tab {
     search_done: bool,
     current_result: Option<u64>,
     search_error: String,
+    chat: crate::chat::Chat,
 }
+
 impl Tab {
     fn new(info: TraceInfo, prefs: &Preferences) -> Self {
         Self {
@@ -161,8 +183,10 @@ impl Tab {
             search_done: false,
             current_result: None,
             search_error: String::new(),
+            chat: crate::chat::Chat::default(),
         }
     }
+
     fn request_search(&mut self, transport: &mut dyn Transport) {
         self.search_gen = self.search_gen.wrapping_add(1);
         self.results.clear();
@@ -180,6 +204,7 @@ impl Tab {
         });
         self.query_dirty = None;
     }
+
     fn ensure_view(&mut self, transport: &mut dyn Transport, size: Vec2) {
         let stride = self.view.stride();
         let start = self.view.row.max(0.0) as u64;
@@ -201,6 +226,7 @@ impl Tab {
             hide_flushed: self.hide_flushed,
         });
     }
+
     fn request_results(&mut self, transport: &mut dyn Transport, start: u64) {
         let page = start / 64 * 64;
         if !self.result_requested.insert(page) {
@@ -213,6 +239,7 @@ impl Tab {
             count: 64,
         });
     }
+
     fn reveal_hit(&mut self, index: u64, transport: &mut dyn Transport) {
         self.current_result = Some(index);
         self.pending_reveal = Some(index);
@@ -231,6 +258,7 @@ impl Tab {
             self.request_results(transport, index);
         }
     }
+
     fn position_at_operation(&mut self, op: &Operation) {
         let first = op
             .stages
@@ -247,6 +275,7 @@ impl Tab {
         self.view.cycle_fraction = 0.0;
         self.view.pan(inset, 0.0);
     }
+
     fn step_result(&mut self, previous: bool, transport: &mut dyn Transport) {
         if self.result_total == 0 || self.wrap_result.is_some() {
             return;
@@ -279,6 +308,7 @@ impl Tab {
         };
         self.reveal_hit(index, transport);
     }
+
     fn zoom_anchor(&self) -> Vec2 {
         self.canvas_rect.map_or(Vec2::ZERO, |rect| {
             Vec2::new(
@@ -300,7 +330,9 @@ pub struct Viewer {
     jump_retired: bool,
     show_help: bool,
     prefs: Preferences,
+    chats: crate::chat::Chats,
 }
+
 impl Viewer {
     fn apply_fonts(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
@@ -328,6 +360,7 @@ impl Viewer {
             .insert(egui::FontFamily::Name("mono-bold".into()), bold);
         ctx.set_fonts(fonts);
     }
+
     fn apply_visuals(ctx: &egui::Context) {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = BG;
@@ -372,6 +405,7 @@ impl Viewer {
                 .insert(egui::TextStyle::Heading, bold_font(18.0));
         });
     }
+
     /// Creates the viewer with muted visuals and native/browser transport.
     pub fn new(cc: &eframe::CreationContext<'_>, transport: Box<dyn Transport>) -> Self {
         Self::apply_fonts(&cc.egui_ctx);
@@ -399,8 +433,10 @@ impl Viewer {
             jump_retired: false,
             show_help: false,
             prefs,
+            chats: crate::chat::Chats::default(),
         }
     }
+
     fn ingest(&mut self, event: Event) {
         match event {
             Event::Info { info } => {
@@ -607,9 +643,11 @@ impl Viewer {
             Event::Metrics { .. } => {}
         }
     }
+
     fn tab_mut(&mut self, id: u32) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|tab| tab.info.id == id)
     }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let comment_editor = self.tabs.iter().any(|tab| tab.comments.editing());
         let typing = ctx.wants_keyboard_input() || comment_editor;
@@ -718,6 +756,7 @@ impl Viewer {
             }
         }
     }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -854,6 +893,20 @@ impl Viewer {
                         }
                     });
                 });
+                if ui
+                    .selectable_label(
+                        self.tabs
+                            .iter()
+                            .find(|t| t.info.id == id)
+                            .is_some_and(|t| t.chat.open),
+                        "Agent",
+                    )
+                    .clicked()
+                    && let Some(tab) = self.tab_mut(id)
+                {
+                    tab.chat.open = !tab.chat.open;
+                    tab.chat.focus_input = tab.chat.open;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("?").clicked() {
@@ -919,6 +972,7 @@ impl Viewer {
             });
         });
     }
+
     fn tabs(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::horizontal()
             .id_salt("trace-tabs")
@@ -956,6 +1010,7 @@ impl Viewer {
                         }
                     }
                     if let Some(id) = close {
+                        self.chats.cancel(id, &mut *self.transport);
                         self.transport.request(Request::Close { trace: id });
                         self.tabs.retain(|tab| tab.info.id != id);
                         if self.active == Some(id) {
@@ -975,6 +1030,26 @@ impl eframe::App for Viewer {
         Self::apply_visuals(ctx);
         for event in self.transport.poll() {
             self.ingest(event);
+        }
+        if let Some(config) = self.transport.agent_configuration() {
+            self.chats.configure(config, &mut *self.transport);
+            for tab in &mut self.tabs {
+                tab.chat.running = false;
+                tab.chat.status = "Agent configuration updated".into();
+            }
+        }
+        for update in self.chats.poll_events(&mut *self.transport) {
+            if let Some(tab) = self.tab_mut(update.trace) {
+                tab.chat.running = update.running;
+                tab.chat.status = update.status;
+                if let Some(text) = update.reply {
+                    tab.chat.messages.push(xonata_agent::Message {
+                        role: xonata_agent::Role::Assistant,
+                        text,
+                    });
+                    xonata_agent::trim_history(&mut tab.chat.messages);
+                }
+            }
         }
         self.shortcuts(ctx);
         egui::TopBottomPanel::top("toolbar")
@@ -1029,6 +1104,19 @@ impl eframe::App for Viewer {
                     }
                 }
             });
+        if let Some(id) = self.active
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.info.id == id)
+            && let Some(canvas) = tab.canvas_rect
+        {
+            self.chats.show(
+                ctx,
+                id,
+                tab.info.complete,
+                &mut tab.chat,
+                canvas,
+                &mut *self.transport,
+            );
+        }
         if let Some(tab) = self
             .active
             .and_then(|id| self.tabs.iter().find(|t| t.info.id == id))
@@ -1185,6 +1273,10 @@ impl eframe::App for Viewer {
                                     for (feature, control) in [
                                         ("Open trace", "Ctrl+O"),
                                         ("Search", "F / Ctrl+F"),
+                                        (
+                                            "Ask about the trace",
+                                            "Agent toolbar · Enter to send · Cancel to stop",
+                                        ),
                                         ("Filter builder / suggestions", "Filters → Query → ▾"),
                                         (
                                             "Sort results by elapsed cycles",
@@ -1230,6 +1322,7 @@ impl eframe::App for Viewer {
         }
         ctx.request_repaint_after(Duration::from_millis(33));
     }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "xonata-prefs", &self.prefs);
     }
@@ -2407,6 +2500,7 @@ fn draw_search(ui: &mut egui::Ui, tab: &mut Tab, transport: &mut dyn Transport) 
         );
     });
 }
+
 fn number_filter(ui: &mut egui::Ui, title: &str, range: &mut xonata_core::NumberRange) -> bool {
     let mut min_text = range.min.map_or_else(String::new, |v| v.to_string());
     let mut max_text = range.max.map_or_else(String::new, |v| v.to_string());
@@ -2446,13 +2540,17 @@ mod tests {
 
     impl Transport for TestTransport {
         fn open_dialog(&mut self) {}
+
         fn request(&mut self, _request: Request) {}
+
         fn poll(&mut self) -> Vec<Event> {
             Vec::new()
         }
+
         fn reduced_motion(&self) -> bool {
             true
         }
+
         #[cfg(not(target_arch = "wasm32"))]
         fn open_paths(&mut self, _paths: Vec<PathBuf>) {}
     }
@@ -2523,14 +2621,18 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingTransport(Vec<Request>);
+
     impl Transport for RecordingTransport {
         fn open_dialog(&mut self) {}
+
         fn request(&mut self, request: Request) {
             self.0.push(request);
         }
+
         fn poll(&mut self) -> Vec<Event> {
             Vec::new()
         }
+
         #[cfg(not(target_arch = "wasm32"))]
         fn open_paths(&mut self, _paths: Vec<PathBuf>) {}
     }
@@ -2665,6 +2767,7 @@ mod tests {
             jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
+            chats: crate::chat::Chats::default(),
         };
         viewer.ingest(Event::Results {
             trace: 1,
@@ -2723,6 +2826,7 @@ mod tests {
                 jump_retired: false,
                 show_help: false,
                 prefs: Preferences::default(),
+                chats: crate::chat::Chats::default(),
             };
             let _ = ctx.run(
                 egui::RawInput {
@@ -2749,6 +2853,71 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn chat_text_editing_should_block_canvas_zoom_shortcuts() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.chat.open = true;
+        tab.chat.focus_input = true;
+        let mut viewer = Viewer {
+            transport: Box::new(TestTransport),
+            tabs: vec![tab],
+            active: Some(1),
+            split: None,
+            error: None,
+            jump_text: String::new(),
+            jump_retired: false,
+            show_help: false,
+            prefs: Preferences::default(),
+            chats: crate::chat::Chats::default(),
+        };
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(canvas),
+                ..Default::default()
+            },
+            |ctx| {
+                viewer.chats.show(
+                    ctx,
+                    1,
+                    true,
+                    &mut viewer.tabs[0].chat,
+                    canvas,
+                    &mut *viewer.transport,
+                );
+            },
+        );
+        assert!(ctx.wants_keyboard_input());
+        let before = (
+            viewer.tabs[0].view.cycle_width,
+            viewer.tabs[0].view.row_height,
+        );
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(canvas),
+                modifiers: Modifiers::CTRL,
+                events: vec![egui::Event::Key {
+                    key: Key::ArrowRight,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::CTRL,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                viewer.shortcuts(ctx);
+            },
+        );
+        assert_eq!(
+            (
+                viewer.tabs[0].view.cycle_width,
+                viewer.tabs[0].view.row_height
+            ),
+            before
+        );
     }
 
     fn filter_hit(tab: &Tab, index: u64) -> xonata_core::filter::FilterHit {
@@ -3019,6 +3188,7 @@ mod tests {
             jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
+            chats: crate::chat::Chats::default(),
         };
         let original = viewer.tabs[0].view.cycle;
         viewer.ingest(Event::FilterSelection {
@@ -3153,6 +3323,7 @@ mod tests {
             jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
+            chats: crate::chat::Chats::default(),
         };
         let mut frame = eframe::Frame::_new_kittest();
         let mut render = |viewer: &mut Viewer, events| {
@@ -3260,6 +3431,7 @@ mod tests {
             jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
+            chats: crate::chat::Chats::default(),
         };
         let mut frame = eframe::Frame::_new_kittest();
         let mut time = 0.0;

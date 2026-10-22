@@ -29,12 +29,19 @@ pub enum StoreError {
 pub trait BackingStore {
     /// Reads an independently stored object.
     async fn read(&mut self, trace: u32, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
+
     /// Atomically replaces an object.
     async fn write(&mut self, trace: u32, key: &str, bytes: &[u8]) -> Result<(), StoreError>;
+
     /// Removes all objects belonging to a trace.
     async fn remove(&mut self, trace: u32) -> Result<(), StoreError>;
+
+    /// Removes auxiliary objects with an exact prefix.
+    async fn clear_prefix(&mut self, trace: u32, prefix: &str) -> Result<(), StoreError>;
+
     /// Removes filter objects for one generation, independently of search.
     async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError>;
+
     /// Removes search objects for a trace.
     async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError>;
 }
@@ -43,12 +50,14 @@ pub trait BackingStore {
 struct Page {
     ops: Vec<Option<Operation>>,
 }
+
 impl Page {
     fn empty() -> Self {
         Self {
             ops: (0..PAGE_SIZE).map(|_| None).collect(),
         }
     }
+
     fn bytes(&self) -> usize {
         self.ops.capacity() * std::mem::size_of::<Option<Operation>>()
             + self
@@ -59,6 +68,7 @@ impl Page {
                 .sum::<usize>()
     }
 }
+
 struct Cached {
     page: Page,
     dirty: bool,
@@ -73,6 +83,7 @@ pub struct PageSummary {
     /// Flushed instructions in this page.
     pub flushed: [u64; 4],
 }
+
 impl PageSummary {
     /// Number of visible instructions.
     pub fn count(&self, hide_flushed: bool) -> u64 {
@@ -82,6 +93,7 @@ impl PageSummary {
             .map(|(p, f)| (if hide_flushed { *p & !f } else { *p }).count_ones() as u64)
             .sum()
     }
+
     /// Iterates occupied slots without expanding the page.
     pub fn slots(&self, hide_flushed: bool) -> impl Iterator<Item = u64> + '_ {
         (0..PAGE_SIZE).filter(move |i| {
@@ -98,9 +110,11 @@ pub struct PageStore {
     cache: LruCache<(u32, u64), Cached>,
     bytes: usize,
     budget: usize,
+    pub(crate) auxiliary_prefix: String,
     /// Per-trace page directories, ordered by operation ID.
     pub directories: BTreeMap<u32, BTreeMap<u64, PageSummary>>,
 }
+
 impl PageStore {
     /// Creates a cache with a global byte budget shared by all traces.
     pub fn new(backing: Box<dyn BackingStore>, budget: usize) -> Self {
@@ -109,9 +123,11 @@ impl PageStore {
             cache: LruCache::unbounded(),
             bytes: 0,
             budget,
+            auxiliary_prefix: String::new(),
             directories: BTreeMap::new(),
         }
     }
+
     async fn ensure(&mut self, trace: u32, page: u64) -> Result<(), StoreError> {
         if self.cache.contains(&(trace, page)) {
             return Ok(());
@@ -136,6 +152,7 @@ impl PageStore {
         );
         Ok(())
     }
+
     /// Reads one operation; the returned copy can be sent to a different thread.
     pub async fn get(&mut self, trace: u32, id: u64) -> Result<Option<Operation>, StoreError> {
         let page = id / PAGE_SIZE;
@@ -154,6 +171,7 @@ impl PageStore {
         self.trim().await?;
         Ok(result)
     }
+
     /// Inserts or updates an operation, preserving post-retirement labels.
     pub async fn set(&mut self, trace: u32, op: Operation) -> Result<(), StoreError> {
         if op.memory_bytes() > 8 * 1024 * 1024 {
@@ -192,6 +210,7 @@ impl PageStore {
         }
         self.trim().await
     }
+
     async fn persist(&mut self, key: (u32, u64), value: &Cached) -> Result<(), StoreError> {
         if value.dirty {
             let raw =
@@ -203,6 +222,7 @@ impl PageStore {
         }
         Ok(())
     }
+
     async fn trim(&mut self) -> Result<(), StoreError> {
         while self.bytes > self.budget {
             let Some((key, value)) = self.cache.pop_lru() else {
@@ -216,6 +236,7 @@ impl PageStore {
         }
         Ok(())
     }
+
     /// Returns IDs and row indexes for a bounded viewport query.
     pub fn visible_ids(
         &self,
@@ -249,6 +270,7 @@ impl PageStore {
         }
         result
     }
+
     /// Finds the unfiltered row of an operation without decoding pages.
     pub fn row_of(&self, trace: u32, id: u64) -> Option<u64> {
         let directory = self.directories.get(&trace)?;
@@ -264,6 +286,7 @@ impl PageStore {
         }
         None
     }
+
     /// Lists bounded IDs from one page.
     pub fn page_ids(&self, trace: u32, page: u64) -> Vec<u64> {
         self.directories
@@ -273,10 +296,12 @@ impl PageStore {
                 s.slots(false).map(|slot| page * PAGE_SIZE + slot).collect()
             })
     }
+
     /// Cache metrics.
     pub fn metrics(&self) -> (usize, usize) {
         (self.bytes, self.cache.len())
     }
+
     /// Stores a bounded block of search result IDs.
     pub async fn write_hits(
         &mut self,
@@ -287,9 +312,14 @@ impl PageStore {
     ) -> Result<(), StoreError> {
         let bytes = postcard::to_allocvec(ids).map_err(|e| StoreError::Codec(e.to_string()))?;
         self.backing
-            .write(trace, &format!("search-{generation}-{page}"), &bytes)
+            .write(
+                trace,
+                &format!("{}search-{generation}-{page}", self.auxiliary_prefix),
+                &bytes,
+            )
             .await
     }
+
     /// Reads a bounded block of search result IDs.
     pub async fn read_hits(
         &mut self,
@@ -299,7 +329,10 @@ impl PageStore {
     ) -> Result<Vec<(u64, u64)>, StoreError> {
         match self
             .backing
-            .read(trace, &format!("search-{generation}-{page}"))
+            .read(
+                trace,
+                &format!("{}search-{generation}-{page}", self.auxiliary_prefix),
+            )
             .await?
         {
             Some(bytes) => {
@@ -308,6 +341,7 @@ impl PageStore {
             None => Ok(Vec::new()),
         }
     }
+
     /// Writes one bounded auxiliary filter index or result page.
     pub async fn write_filter<T: Serialize>(
         &mut self,
@@ -318,9 +352,14 @@ impl PageStore {
     ) -> Result<(), StoreError> {
         let bytes = postcard::to_allocvec(value).map_err(|e| StoreError::Codec(e.to_string()))?;
         self.backing
-            .write(trace, &format!("filter-{generation}-{key}"), &bytes)
+            .write(
+                trace,
+                &format!("{}filter-{generation}-{key}", self.auxiliary_prefix),
+                &bytes,
+            )
             .await
     }
+
     /// Reads one bounded auxiliary filter page.
     pub async fn read_filter<T: serde::de::DeserializeOwned + Default>(
         &mut self,
@@ -330,7 +369,10 @@ impl PageStore {
     ) -> Result<T, StoreError> {
         match self
             .backing
-            .read(trace, &format!("filter-{generation}-{key}"))
+            .read(
+                trace,
+                &format!("{}filter-{generation}-{key}", self.auxiliary_prefix),
+            )
             .await?
         {
             Some(bytes) => {
@@ -339,14 +381,42 @@ impl PageStore {
             None => Ok(T::default()),
         }
     }
+
     /// Releases filter objects without removing operation or search pages.
     pub async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
-        self.backing.clear_filter(trace, generation).await
+        if self.auxiliary_prefix.is_empty() {
+            self.backing.clear_filter(trace, generation).await
+        } else {
+            self.backing
+                .clear_prefix(
+                    trace,
+                    &format!("{}filter-{generation}-", self.auxiliary_prefix),
+                )
+                .await
+        }
     }
+
     /// Clears disk-backed result indexes.
     pub async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError> {
-        self.backing.clear_search(trace).await
+        if self.auxiliary_prefix.is_empty() {
+            self.backing.clear_search(trace).await
+        } else {
+            self.backing
+                .clear_prefix(trace, &format!("{}search-", self.auxiliary_prefix))
+                .await
+        }
     }
+
+    pub(crate) async fn clear_analysis(
+        &mut self,
+        trace: u32,
+        session: u32,
+    ) -> Result<(), StoreError> {
+        self.backing
+            .clear_prefix(trace, &format!("analysis-{session}-"))
+            .await
+    }
+
     /// Releases cached pages, directory, and backing objects for one trace.
     pub async fn remove(&mut self, trace: u32) -> Result<(), StoreError> {
         let keys: Vec<_> = self
@@ -370,6 +440,7 @@ impl PageStore {
 pub struct NativeBacking {
     directory: tempfile::TempDir,
 }
+
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeBacking {
     /// Creates a private temporary trace directory.
@@ -380,10 +451,12 @@ impl NativeBacking {
             .map(|directory| Self { directory })
             .map_err(|e| StoreError::Storage(e.to_string()))
     }
+
     fn dir(&self, trace: u32) -> std::path::PathBuf {
         self.directory.path().join(trace.to_string())
     }
 }
+
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait(?Send)]
 impl BackingStore for NativeBacking {
@@ -394,6 +467,7 @@ impl BackingStore for NativeBacking {
             Err(e) => Err(StoreError::Storage(e.to_string())),
         }
     }
+
     async fn write(&mut self, trace: u32, key: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let directory = self.dir(trace);
         std::fs::create_dir_all(&directory).map_err(|e| StoreError::Storage(e.to_string()))?;
@@ -401,6 +475,7 @@ impl BackingStore for NativeBacking {
         std::fs::write(&temp, bytes).map_err(|e| StoreError::Storage(e.to_string()))?;
         std::fs::rename(temp, directory.join(key)).map_err(|e| StoreError::Storage(e.to_string()))
     }
+
     async fn remove(&mut self, trace: u32) -> Result<(), StoreError> {
         match std::fs::remove_dir_all(self.dir(trace)) {
             Ok(()) => Ok(()),
@@ -408,14 +483,14 @@ impl BackingStore for NativeBacking {
             Err(e) => Err(StoreError::Storage(e.to_string())),
         }
     }
-    async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
+
+    async fn clear_prefix(&mut self, trace: u32, prefix: &str) -> Result<(), StoreError> {
         if self.dir(trace).exists() {
-            let prefix = format!("filter-{generation}-");
             for entry in std::fs::read_dir(self.dir(trace))
                 .map_err(|e| StoreError::Storage(e.to_string()))?
             {
                 let entry = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
-                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                if entry.file_name().to_string_lossy().starts_with(prefix) {
                     std::fs::remove_file(entry.path())
                         .map_err(|e| StoreError::Storage(e.to_string()))?;
                 }
@@ -423,18 +498,13 @@ impl BackingStore for NativeBacking {
         }
         Ok(())
     }
+
+    async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
+        self.clear_prefix(trace, &format!("filter-{generation}-"))
+            .await
+    }
+
     async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError> {
-        if self.dir(trace).exists() {
-            for entry in std::fs::read_dir(self.dir(trace))
-                .map_err(|e| StoreError::Storage(e.to_string()))?
-            {
-                let entry = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
-                if entry.file_name().to_string_lossy().starts_with("search-") {
-                    std::fs::remove_file(entry.path())
-                        .map_err(|e| StoreError::Storage(e.to_string()))?;
-                }
-            }
-        }
-        Ok(())
+        self.clear_prefix(trace, "search-").await
     }
 }

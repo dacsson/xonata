@@ -95,3 +95,47 @@ Filters match each pipeline row directly; separate micro-operation rows are not 
 Browser embeds can observe `xonata:filter_suggestions`, `xonata:filter_progress`, `xonata:filter_results`, `xonata:filter_sort_progress`, `xonata:filter_sorted_results`, `xonata:filter_drawn`, `xonata:filter_drawing`, and `xonata:filter_error` canvas events (JSON detail). Filter IDs, cycles, row indexes, counts, and elapsed values are decimal strings to preserve precision.
 
 Development and verification instructions are in [AGENTS.md](AGENTS.md). Bundled Liberation Mono fonts include their [license](crates/app/assets/fonts/LICENSE).
+
+## Trace analysis agent
+
+**Agent** opens a session-only conversation for the active trace after loading finishes. Enter or **Send** submits a question; **Cancel** stops the current analysis. Conversations retain follow-up context independently per tab. Closing the panel leaves its run active; closing its trace cancels the run. Text editing keeps canvas shortcuts inactive.
+
+The agent uses Rig with an OpenAI-compatible chat-completions endpoint, including LiteLLM. Rust 1.97.1 or newer is required. For native use:
+
+```sh
+export LITELLM_API_KEY='your-session-key'
+export LITELLM_BASE_URL='http://localhost:4000/v1'
+export LITELLM_MODEL='rig-chat'
+cargo run --release -p xonata-app
+```
+
+The endpoint and model default to the values above; an API key is required. Unconfigured viewers continue working with agent access unavailable.
+
+On the standalone page, configure the mounted viewer from the browser console using `window.xonata`:
+
+```js
+window.xonata.configure_agent(JSON.stringify({
+  base_url: 'https://your-compatible-proxy.example/v1',
+  api_key: 'your-api-key',
+  model: 'your-model',
+}));
+// Cancel active analyses and clear the connection:
+window.xonata.clear_agent_configuration();
+```
+
+The standalone page's `viewer` name refers to the canvas element, not the application handle. Embedded hosts call these methods on their own `WebHandle` instance, as shown in the embedding example.
+
+Configuration and conversations stay in memory. Browser requests go directly to the configured endpoint, which must allow the page's origin through CORS. Keys supplied to a browser are accessible to that browser; use a session-scoped proxy credential. Trace snippets requested by tools are sent to the configured model endpoint. The standalone Pages site does not embed credentials or configure a backend automatically. See [the embedding example](web/embed-example.html).
+
+Tools inspect trace metadata, unfiltered rows, operation stages and dependencies, instruction searches, and phase/interval queries with signed elapsed sorting. Agent queries share trace pages but have independent query state and temporary indexes, preserving viewer searches, filters, and drawings. Tools do not navigate or modify the viewer. Replies cite observed operation IDs and cycles; interpretation remains model-generated.
+
+Each tab permits one run, with two runs globally. A run is limited to 120 seconds, 16 model turns, and 32 tool calls. Result pages default to 20 items and are capped at 64, with tool output capped at 64 KiB and truncation indicated. Conversations retain at most 32 messages and 64 KiB; final replies are capped at 32 KiB. Closing a trace, changing configuration, cancelling, or finishing releases run-owned indexes.
+
+Agent tests use deterministic local mock responses and require no external credentials:
+
+```sh
+cargo test --workspace --locked
+node scripts/browser-agent-smoke.mjs
+```
+
+The browser agent check requires the same WASM build, Node.js, and Chromium as the existing browser smoke check. It exercises model/tool round trips, phase sorting, follow-up context, and cancellation against a local mock endpoint.

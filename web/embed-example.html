@@ -11,6 +11,12 @@
     await init();
     const viewer = new WebHandle();
     await viewer.start(document.getElementById('pipeline'));
+    // Optional: obtain these settings from your host's session configuration.
+    // await viewer.configure_agent(JSON.stringify({
+    //   base_url: 'https://your-compatible-proxy.example/v1',
+    //   api_key: 'session-provided-key', model: 'your-model'
+    // }));
+    // viewer.clear_agent_configuration(); // Cancels active runs and clears credentials.
     window.viewer = viewer;
     window.xonata = viewer;
   </script>

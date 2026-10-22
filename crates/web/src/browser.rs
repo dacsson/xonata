@@ -173,41 +173,50 @@ export async function pageRemove(trace, prefix) {
 extern "C" {
     #[wasm_bindgen(js_name = pageRead, catch)]
     async fn page_read(trace: u32, key: &str) -> Result<JsValue, JsValue>;
+
     #[wasm_bindgen(js_name = pageWrite, catch)]
     async fn page_write(trace: u32, key: &str, bytes: &Uint8Array) -> Result<JsValue, JsValue>;
+
     #[wasm_bindgen(js_name = pageRemove, catch)]
     async fn page_remove(trace: u32, prefix: &str) -> Result<JsValue, JsValue>;
 }
+
 struct BrowserBacking;
+
 #[async_trait(?Send)]
 impl BackingStore for BrowserBacking {
     async fn read(&mut self, trace: u32, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let value = page_read(trace, key).await.map_err(js_storage_error)?;
         Ok((!value.is_null() && !value.is_undefined()).then(|| Uint8Array::new(&value).to_vec()))
     }
+
     async fn write(&mut self, trace: u32, key: &str, bytes: &[u8]) -> Result<(), StoreError> {
         page_write(trace, key, &Uint8Array::from(bytes))
             .await
             .map_err(js_storage_error)?;
         Ok(())
     }
+
     async fn remove(&mut self, trace: u32) -> Result<(), StoreError> {
         page_remove(trace, "").await.map_err(js_storage_error)?;
         Ok(())
     }
-    async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
-        page_remove(trace, &format!("filter-{generation}-"))
-            .await
-            .map_err(js_storage_error)?;
+
+    async fn clear_prefix(&mut self, trace: u32, prefix: &str) -> Result<(), StoreError> {
+        page_remove(trace, prefix).await.map_err(js_storage_error)?;
         Ok(())
     }
-    async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError> {
-        page_remove(trace, "search-")
+
+    async fn clear_filter(&mut self, trace: u32, generation: u32) -> Result<(), StoreError> {
+        self.clear_prefix(trace, &format!("filter-{generation}-"))
             .await
-            .map_err(js_storage_error)?;
-        Ok(())
+    }
+
+    async fn clear_search(&mut self, trace: u32) -> Result<(), StoreError> {
+        self.clear_prefix(trace, "search-").await
     }
 }
+
 fn js_storage_error(error: JsValue) -> StoreError {
     StoreError::Storage(format!("{error:?}"))
 }
@@ -217,6 +226,7 @@ fn js_storage_error(error: JsValue) -> StoreError {
 pub struct WorkerEngine {
     engine: Engine,
 }
+
 #[wasm_bindgen]
 impl WorkerEngine {
     /// Creates one worker-owned engine.
@@ -226,18 +236,22 @@ impl WorkerEngine {
             engine: Engine::new(Box::new(BrowserBacking)),
         }
     }
+
     /// Opens a trace.
     pub async fn open(&mut self, id: u32, name: String) -> Result<String, JsValue> {
         json(self.engine.open(id, name).await)
     }
+
     /// Appends bounded input bytes.
     pub async fn feed(&mut self, id: u32, bytes: Uint8Array) -> Result<String, JsValue> {
         json(self.engine.feed(id, &bytes.to_vec()).await)
     }
+
     /// Completes the input stream.
     pub async fn finish(&mut self, id: u32) -> Result<String, JsValue> {
         json(self.engine.finish(id).await)
     }
+
     /// Runs a viewport, overview, navigation, search, result, or close request.
     pub async fn request(&mut self, request: String) -> Result<String, JsValue> {
         let request: Request =
@@ -254,6 +268,21 @@ impl WorkerEngine {
             None => Ok(String::new()),
         }
     }
+
+    /// Runs a correlated analysis request; result integers stay inside opaque JSON.
+    pub async fn analysis(&mut self, text: String) -> Result<String, JsValue> {
+        let request: xonata_core::AnalysisRequest =
+            serde_json::from_str(&text).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let (trace, session, id) = (request.trace, request.session, request.request);
+        let result = self
+            .engine
+            .analysis_request(request)
+            .await
+            .map_err(|e| e.to_string());
+        serde_json::to_string(&serde_json::json!({"type":"analysis","trace":trace,"session":session,"request":id,"result":result}))
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
     /// Advances bounded search and overview batches.
     pub async fn tick(&mut self) -> Result<String, JsValue> {
         serde_json::to_string(
@@ -265,19 +294,31 @@ impl WorkerEngine {
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))
     }
+
     /// Whether more search or overview work remains.
     pub fn has_work(&self) -> bool {
         self.engine.has_search_work()
     }
 }
+
 impl Default for WorkerEngine {
     fn default() -> Self {
         Self::new()
     }
 }
+
 fn json(value: Result<CoreEvent, StoreError>) -> Result<String, JsValue> {
     serde_json::to_string(&value.map_err(|e| JsValue::from_str(&e.to_string()))?)
         .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+type AnalysisReplies =
+    Rc<RefCell<std::collections::BTreeMap<(u32, u32), xonata_app::chat::AnalysisReply>>>;
+#[derive(serde::Deserialize)]
+struct AnalysisResponse {
+    session: u32,
+    request: u32,
+    result: Result<serde_json::Value, String>,
 }
 
 #[derive(Clone)]
@@ -288,11 +329,14 @@ struct BrowserTransport {
     events: Rc<RefCell<Vec<CoreEvent>>>,
     context: Rc<RefCell<Option<egui::Context>>>,
     next_id: Rc<Cell<u32>>,
+    analysis_replies: AnalysisReplies,
+    agent_config: Rc<RefCell<Option<Option<xonata_app::chat::AgentConfig>>>>,
     _message: Rc<Closure<dyn FnMut(MessageEvent)>>,
     _change: Rc<Closure<dyn FnMut(Event)>>,
     _dragover: Rc<Closure<dyn FnMut(DragEvent)>>,
     _drop: Rc<Closure<dyn FnMut(DragEvent)>>,
 }
+
 impl BrowserTransport {
     fn new(canvas: &HtmlCanvasElement) -> Result<Self, JsValue> {
         let options = WorkerOptions::new();
@@ -312,10 +356,21 @@ impl BrowserTransport {
         let events = Rc::new(RefCell::new(Vec::new()));
         let context: Rc<RefCell<Option<egui::Context>>> = Rc::new(RefCell::new(None));
         let next_id = Rc::new(Cell::new(1u32));
+        let analysis_replies: AnalysisReplies =
+            Rc::new(RefCell::new(std::collections::BTreeMap::new()));
+        let replies = analysis_replies.clone();
         let queue = events.clone();
         let repaint = context.clone();
         let event_canvas = canvas.clone();
         let message = Closure::<dyn FnMut(MessageEvent)>::new(move |message: MessageEvent| {
+            if let Some(text) = message.data().as_string()
+                && let Ok(response) = serde_json::from_str::<AnalysisResponse>(&text)
+                && let Some(reply) = replies
+                    .borrow_mut()
+                    .remove(&(response.session, response.request))
+            {
+                let _ = reply.send(response.result);
+            }
             if let Some(text) = message.data().as_string()
                 && let Ok(event) = serde_json::from_str::<CoreEvent>(&text)
             {
@@ -381,15 +436,19 @@ impl BrowserTransport {
             events,
             context,
             next_id,
+            analysis_replies,
+            agent_config: Rc::new(RefCell::new(None)),
             _message: Rc::new(message),
             _change: Rc::new(change),
             _dragover: Rc::new(dragover),
             _drop: Rc::new(drop),
         })
     }
+
     fn set_context(&self, context: egui::Context) {
         *self.context.borrow_mut() = Some(context);
     }
+
     fn send(&self, kind: &str, value: JsValue) {
         let object = Object::new();
         let _ = Reflect::set(
@@ -401,18 +460,47 @@ impl BrowserTransport {
         let _ = self.worker.post_message(&object);
     }
 }
+
 impl Transport for BrowserTransport {
     fn open_dialog(&mut self) {
         self.input.click();
     }
+
     fn request(&mut self, request: Request) {
         if let Ok(text) = serde_json::to_string(&request) {
             self.send("request", JsValue::from_str(&text));
         }
     }
+
+    fn analysis(
+        &mut self,
+        request: xonata_core::AnalysisRequest,
+        reply: xonata_app::chat::AnalysisReply,
+    ) {
+        self.analysis_replies
+            .borrow_mut()
+            .retain(|_, pending| !pending.is_canceled());
+        match serde_json::to_string(&request) {
+            Ok(text) => {
+                self.analysis_replies
+                    .borrow_mut()
+                    .insert((request.session, request.request), reply);
+                self.send("analysis", JsValue::from_str(&text));
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error.to_string()));
+            }
+        }
+    }
+
+    fn agent_configuration(&mut self) -> Option<Option<xonata_app::chat::AgentConfig>> {
+        self.agent_config.borrow_mut().take()
+    }
+
     fn poll(&mut self) -> Vec<CoreEvent> {
         std::mem::take(&mut *self.events.borrow_mut())
     }
+
     fn selection(&mut self, trace: u32, op: u64) {
         dispatch(
             &self.canvas,
@@ -420,6 +508,7 @@ impl Transport for BrowserTransport {
             &format!("{{\"trace\":{trace},\"op_id\":\"{op}\"}}"),
         );
     }
+
     fn reduced_motion(&self) -> bool {
         web_sys::window()
             .and_then(|window| {
@@ -431,6 +520,7 @@ impl Transport for BrowserTransport {
             .is_some_and(|media| media.matches())
     }
 }
+
 fn dispatch(canvas: &HtmlCanvasElement, name: &str, text: &str) {
     let init = CustomEventInit::new();
     init.set_detail(&JsValue::from_str(text));
@@ -438,6 +528,7 @@ fn dispatch(canvas: &HtmlCanvasElement, name: &str, text: &str) {
         let _ = canvas.dispatch_event(&event);
     }
 }
+
 fn send_file(worker: &Worker, next: &Cell<u32>, file: File) {
     let id = next.get();
     next.set(id.saturating_add(1));
@@ -462,6 +553,7 @@ pub struct WebHandle {
     runner: eframe::WebRunner,
     transport: RefCell<Option<BrowserTransport>>,
 }
+
 #[wasm_bindgen]
 impl WebHandle {
     /// Creates a mountable viewer.
@@ -472,6 +564,7 @@ impl WebHandle {
             transport: RefCell::new(None),
         }
     }
+
     /// Mounts the viewer on a host-provided canvas.
     pub async fn start(&self, canvas: HtmlCanvasElement) -> Result<(), JsValue> {
         let transport = BrowserTransport::new(&canvas)?;
@@ -489,6 +582,36 @@ impl WebHandle {
         *self.transport.borrow_mut() = Some(transport);
         Ok(())
     }
+
+    /// Configures session-only agent access from a host-provided JSON object.
+    pub fn configure_agent(&self, config: String) -> Result<(), JsValue> {
+        let config: xonata_app::chat::AgentConfig =
+            serde_json::from_str(&config).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        config.validate().map_err(|e| JsValue::from_str(&e))?;
+        let borrow = self.transport.borrow();
+        let transport = borrow
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Viewer is not mounted"))?;
+        *transport.agent_config.borrow_mut() = Some(Some(config));
+        if let Some(ctx) = transport.context.borrow().as_ref() {
+            ctx.request_repaint();
+        }
+        Ok(())
+    }
+
+    /// Clears credentials and cancels active analyses without persisting settings.
+    pub fn clear_agent_configuration(&self) -> Result<(), JsValue> {
+        let borrow = self.transport.borrow();
+        let transport = borrow
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Viewer is not mounted"))?;
+        *transport.agent_config.borrow_mut() = Some(None);
+        if let Some(ctx) = transport.context.borrow().as_ref() {
+            ctx.request_repaint();
+        }
+        Ok(())
+    }
+
     /// Opens a host-provided File object.
     pub fn open_file(&self, file: File) -> Result<(), JsValue> {
         let borrow = self.transport.borrow();
@@ -498,6 +621,7 @@ impl WebHandle {
         send_file(&transport.worker, &transport.next_id, file);
         Ok(())
     }
+
     /// Jumps to a decimal operation ID without losing 64-bit precision.
     pub fn navigate(&self, trace: u32, decimal_id: String) -> Result<(), JsValue> {
         let id = decimal_id
@@ -517,6 +641,7 @@ impl WebHandle {
         transport.send("request", JsValue::from_str(&text));
         Ok(())
     }
+
     /// Tears down the browser application and worker.
     pub fn destroy(&self) {
         self.runner.destroy();
@@ -531,11 +656,13 @@ impl WebHandle {
                 "drop",
                 transport._drop.as_ref().as_ref().unchecked_ref(),
             );
+            transport.analysis_replies.borrow_mut().clear();
             transport.worker.terminate();
             transport.input.remove();
         }
     }
 }
+
 impl Default for WebHandle {
     fn default() -> Self {
         Self::new()

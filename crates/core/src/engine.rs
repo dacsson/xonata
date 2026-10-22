@@ -1,5 +1,8 @@
 //! Single-owner trace worker with interleaved viewport and search commands.
 use crate::compression::Decoder;
+
+#[path = "analysis.rs"]
+mod analysis;
 use crate::filter::FilterQuery;
 use crate::filter_engine::{Drawing, DrawingScan, FilterJob, ResultSort, result_page};
 use crate::filter_suggestions::Suggestions;
@@ -7,11 +10,17 @@ use crate::parser::Parser;
 use crate::search::Matcher;
 use crate::storage::{BackingStore, CACHE_BUDGET, PageStore, StoreError};
 use crate::{Event, OverviewRaster, Request, Row, SearchHit, TraceInfo};
+pub use analysis::{AnalysisAction, AnalysisRequest};
 use std::collections::BTreeMap;
 
 struct Trace {
     parser: Parser,
     decoder: Decoder,
+    queries: QueryContext,
+}
+
+#[derive(Default)]
+struct QueryContext {
     search: Option<Search>,
     overview: Option<Overview>,
     filter: Option<FilterJob>,
@@ -20,6 +29,7 @@ struct Trace {
     drawing_scan: Option<DrawingScan>,
     suggestions: Option<Suggestions>,
 }
+
 struct Search {
     generation: u32,
     matcher: Matcher,
@@ -48,15 +58,21 @@ fn overview_column(cycle: u64, info: &TraceInfo, width: usize) -> usize {
 pub struct Engine {
     store: PageStore,
     traces: BTreeMap<u32, Trace>,
+    analysis: BTreeMap<(u32, u32), QueryContext>,
+    analysis_errors: BTreeMap<(u32, u32), String>,
 }
+
 impl Engine {
     /// Constructs a worker with a shared 128 MiB decoded-page budget.
     pub fn new(backing: Box<dyn BackingStore>) -> Self {
         Self {
             store: PageStore::new(backing, CACHE_BUDGET),
             traces: BTreeMap::new(),
+            analysis: BTreeMap::new(),
+            analysis_errors: BTreeMap::new(),
         }
     }
+
     /// Starts a trace, replacing any previous use of the same ID.
     pub async fn open(&mut self, id: u32, name: String) -> Result<Event, StoreError> {
         if self.traces.contains_key(&id) {
@@ -68,13 +84,7 @@ impl Engine {
             Trace {
                 parser,
                 decoder: Decoder::from_name(&name),
-                search: None,
-                overview: None,
-                filter: None,
-                sorting: None,
-                drawing: None,
-                drawing_scan: None,
-                suggestions: None,
+                queries: QueryContext::default(),
             },
         );
         self.store.directories.insert(id, BTreeMap::new());
@@ -82,6 +92,7 @@ impl Engine {
             info: self.traces[&id].parser.info.clone(),
         })
     }
+
     /// Appends at most 256 KiB of original file bytes.
     pub async fn feed(&mut self, id: u32, bytes: &[u8]) -> Result<Event, StoreError> {
         let trace = self
@@ -96,6 +107,7 @@ impl Engine {
             info: trace.parser.info.clone(),
         })
     }
+
     /// Validates compression and marks unretired instructions incomplete.
     pub async fn finish(&mut self, id: u32) -> Result<Event, StoreError> {
         let trace = self
@@ -111,11 +123,15 @@ impl Engine {
             info: trace.parser.info.clone(),
         })
     }
+
     /// Drops one trace and its worker-owned storage.
     pub async fn close(&mut self, id: u32) -> Result<(), StoreError> {
+        self.analysis_errors.retain(|(trace, _), _| *trace != id);
+        self.analysis.retain(|(trace, _), _| *trace != id);
         self.traces.remove(&id);
         self.store.remove(id).await
     }
+
     /// Executes one bounded UI request.
     pub async fn request(&mut self, request: Request) -> Result<Option<Event>, StoreError> {
         match request {
@@ -135,8 +151,16 @@ impl Engine {
                     .store
                     .visible_ids(trace, start, stride, count, hide_flushed);
                 let mut rows = Vec::with_capacity(ids.len());
+                let mut payload_bytes = 0;
                 for (index, id) in ids {
                     if let Some(op) = self.store.get(trace, id).await? {
+                        if !self.store.auxiliary_prefix.is_empty()
+                            && !rows.is_empty()
+                            && payload_bytes + op.memory_bytes() > 64 * 1024
+                        {
+                            break;
+                        }
+                        payload_bytes += op.memory_bytes();
                         rows.push(Row { index, op });
                     }
                 }
@@ -168,7 +192,7 @@ impl Engine {
                 let height = height
                     .clamp(1, 1024)
                     .min(target.parser.info.count.clamp(1, 1024) as u16);
-                target.overview = Some(Overview {
+                target.queries.overview = Some(Overview {
                     generation,
                     pages,
                     cursor: 0,
@@ -200,7 +224,7 @@ impl Engine {
                 query,
             } => {
                 if let Some(target) = self.traces.get_mut(&trace) {
-                    target.search = None;
+                    target.queries.search = None;
                 }
                 self.store.clear_search(trace).await?;
                 let matcher = Matcher::new(*query)?;
@@ -213,7 +237,7 @@ impl Engine {
                     .traces
                     .get_mut(&trace)
                     .ok_or_else(|| StoreError::Input("Trace is closed".into()))?;
-                target.search = Some(Search {
+                target.queries.search = Some(Search {
                     generation,
                     matcher,
                     pages,
@@ -222,7 +246,11 @@ impl Engine {
                     total: 0,
                     block: Vec::new(),
                 });
-                let empty = target.search.as_ref().is_some_and(|s| s.pages.is_empty());
+                let empty = target
+                    .queries
+                    .search
+                    .as_ref()
+                    .is_some_and(|s| s.pages.is_empty());
                 Ok(Some(Event::SearchProgress {
                     trace,
                     generation,
@@ -233,7 +261,7 @@ impl Engine {
             }
             Request::CancelSearch { trace } => {
                 if let Some(target) = self.traces.get_mut(&trace) {
-                    target.search = None;
+                    target.queries.search = None;
                 }
                 self.store.clear_search(trace).await?;
                 Ok(None)
@@ -249,6 +277,7 @@ impl Engine {
                     .get(&trace)
                     .ok_or_else(|| StoreError::Input("Trace is closed".into()))?;
                 let search = target
+                    .queries
                     .search
                     .as_ref()
                     .ok_or_else(|| StoreError::Input("Search is closed".into()))?;
@@ -256,6 +285,7 @@ impl Engine {
                     return Ok(None);
                 }
                 let mut hits = Vec::new();
+                let mut payload_bytes = 0;
                 let end = start
                     .saturating_add(count.min(256) as u64)
                     .min(search.total);
@@ -269,6 +299,13 @@ impl Engine {
                     if let Some(&(row, id)) = block.get((n % 1024) as usize)
                         && let Some(op) = self.store.get(trace, id).await?
                     {
+                        if !self.store.auxiliary_prefix.is_empty()
+                            && !hits.is_empty()
+                            && payload_bytes + op.memory_bytes() > 64 * 1024
+                        {
+                            break;
+                        }
+                        payload_bytes += op.memory_bytes();
                         let snippets = search
                             .matcher
                             .snippets(&op, &target.parser.info.symbols)
@@ -300,7 +337,8 @@ impl Engine {
                     .directories
                     .get(&trace)
                     .map_or_else(Vec::new, |d| d.keys().copied().collect());
-                target.suggestions = Some(Suggestions::new(generation, field, &text, pages)?);
+                target.queries.suggestions =
+                    Some(Suggestions::new(generation, field, &text, pages)?);
                 Ok(None)
             }
             Request::Filter {
@@ -320,9 +358,10 @@ impl Engine {
                         message: "Wait for trace loading to finish".into(),
                     }));
                 }
-                target.sorting = None;
-                if let Some(old) = target.filter.take()
+                target.queries.sorting = None;
+                if let Some(old) = target.queries.filter.take()
                     && !target
+                        .queries
                         .drawing
                         .as_ref()
                         .is_some_and(|d| d.generation == old.generation)
@@ -344,25 +383,28 @@ impl Engine {
                     .directories
                     .get(&trace)
                     .map_or_else(Vec::new, |d| d.keys().copied().collect());
-                target.filter = Some(FilterJob::new(generation, query, skip, pages));
+                target.queries.filter = Some(FilterJob::new(generation, query, skip, pages));
                 Ok(None)
             }
             Request::CancelFilter { trace, generation } => {
                 if let Some(target) = self.traces.get_mut(&trace)
                     && target
+                        .queries
                         .filter
                         .as_ref()
                         .is_some_and(|f| f.generation == generation)
                 {
-                    target.sorting = None;
+                    target.queries.sorting = None;
                 }
                 if let Some(target) = self.traces.get_mut(&trace)
                     && target
+                        .queries
                         .filter
                         .as_ref()
                         .is_some_and(|f| f.generation == generation)
-                    && let Some(old) = target.filter.take()
+                    && let Some(old) = target.queries.filter.take()
                     && !target
+                        .queries
                         .drawing
                         .as_ref()
                         .is_some_and(|d| d.generation == old.generation)
@@ -380,7 +422,7 @@ impl Engine {
                 let Some(job) = self
                     .traces
                     .get(&trace)
-                    .and_then(|t| t.filter.as_ref())
+                    .and_then(|t| t.queries.filter.as_ref())
                     .filter(|f| f.generation == generation)
                 else {
                     return Ok(None);
@@ -404,6 +446,7 @@ impl Engine {
                     return Ok(None);
                 };
                 let Some(job) = target
+                    .queries
                     .filter
                     .as_ref()
                     .filter(|f| f.generation == generation && f.done)
@@ -411,13 +454,14 @@ impl Engine {
                     return Ok(None);
                 };
                 if target
+                    .queries
                     .sorting
                     .as_ref()
                     .is_some_and(|old| revision.wrapping_sub(old.revision) >= (1 << 31))
                 {
                     return Ok(None);
                 }
-                target.sorting = Some(ResultSort::new(revision, descending, job.total));
+                target.queries.sorting = Some(ResultSort::new(revision, descending, job.total));
                 Ok(None)
             }
             Request::SortedFilterResults {
@@ -428,13 +472,15 @@ impl Engine {
                 count,
             } => {
                 let Some(target) = self.traces.get(&trace).filter(|t| {
-                    t.filter
+                    t.queries
+                        .filter
                         .as_ref()
                         .is_some_and(|f| f.generation == generation)
                 }) else {
                     return Ok(None);
                 };
                 let Some(view) = target
+                    .queries
                     .sorting
                     .as_ref()
                     .filter(|r| r.revision == revision && r.done)
@@ -460,7 +506,7 @@ impl Engine {
                 let Some(job) = self
                     .traces
                     .get(&trace)
-                    .and_then(|t| t.filter.as_ref())
+                    .and_then(|t| t.queries.filter.as_ref())
                     .filter(|f| f.generation == generation)
                 else {
                     return Ok(None);
@@ -491,6 +537,7 @@ impl Engine {
                     return Ok(None);
                 };
                 let Some(job) = target
+                    .queries
                     .filter
                     .as_ref()
                     .filter(|f| f.generation == generation && f.done)
@@ -509,17 +556,17 @@ impl Engine {
                     options.label = label;
                 }
                 let total = job.total;
-                if let Some(old) = target.drawing.take()
+                if let Some(old) = target.queries.drawing.take()
                     && old.generation != generation
                 {
                     self.store.clear_filter(trace, old.generation).await?;
                 }
-                target.drawing = Some(Drawing {
+                target.queries.drawing = Some(Drawing {
                     generation,
                     total,
                     options: options.clone(),
                 });
-                target.drawing_scan = None;
+                target.queries.drawing_scan = None;
                 Ok(Some(Event::FilterDrawn {
                     trace,
                     generation,
@@ -528,15 +575,16 @@ impl Engine {
             }
             Request::ClearFilterDrawing { trace } => {
                 if let Some(target) = self.traces.get_mut(&trace) {
-                    if let Some(old) = target.drawing.take()
+                    if let Some(old) = target.queries.drawing.take()
                         && !target
+                            .queries
                             .filter
                             .as_ref()
                             .is_some_and(|f| f.generation == old.generation)
                     {
                         self.store.clear_filter(trace, old.generation).await?;
                     }
-                    target.drawing_scan = None;
+                    target.queries.drawing_scan = None;
                 }
                 Ok(None)
             }
@@ -549,11 +597,12 @@ impl Engine {
             } => {
                 if let Some(target) = self.traces.get_mut(&trace)
                     && let Some(drawing) = target
+                        .queries
                         .drawing
                         .as_ref()
                         .filter(|d| d.generation == generation)
                 {
-                    target.drawing_scan = Some(DrawingScan::new(
+                    target.queries.drawing_scan = Some(DrawingScan::new(
                         request,
                         drawing,
                         bounds,
@@ -596,15 +645,25 @@ impl Engine {
             }
         }
     }
+
     /// Advances bounded overview and search batches during worker idle periods.
     pub async fn tick(&mut self) -> Result<Vec<Event>, StoreError> {
         let ids: Vec<u32> = self.traces.keys().copied().collect();
+        let events = self.tick_traces(ids).await?;
+        self.tick_analysis().await?;
+        Ok(events)
+    }
+
+    async fn tick_traces(
+        &mut self,
+        ids: impl IntoIterator<Item = u32>,
+    ) -> Result<Vec<Event>, StoreError> {
         let mut events = Vec::new();
         for id in ids {
             let Some(trace) = self.traces.get_mut(&id) else {
                 continue;
             };
-            if let Some(overview) = trace.overview.as_mut() {
+            if let Some(overview) = trace.queries.overview.as_mut() {
                 let width = overview.raster.width as usize;
                 let height = overview.raster.height as usize;
                 // Small batches let view and search requests interleave with raster construction.
@@ -641,7 +700,7 @@ impl Engine {
                     overview.cursor += 1;
                 }
                 if overview.cursor >= overview.pages.len()
-                    && let Some(overview) = trace.overview.take()
+                    && let Some(overview) = trace.queries.overview.take()
                 {
                     events.push(Event::Overview {
                         trace: id,
@@ -650,21 +709,21 @@ impl Engine {
                     });
                 }
             }
-            if let Some(suggestions) = trace.suggestions.as_mut() {
+            if let Some(suggestions) = trace.queries.suggestions.as_mut() {
                 let event = suggestions
                     .tick(&mut self.store, &trace.parser.info)
                     .await?;
                 if matches!(&event, Event::FilterSuggestions { done: true, .. }) {
-                    trace.suggestions = None;
+                    trace.queries.suggestions = None;
                 }
                 events.push(event);
             }
-            if let Some(view) = trace.sorting.as_mut().filter(|r| !r.done)
-                && let Some(filter) = &trace.filter
+            if let Some(view) = trace.queries.sorting.as_mut().filter(|r| !r.done)
+                && let Some(filter) = &trace.queries.filter
             {
                 events.push(view.tick(&mut self.store, id, filter.generation).await?);
             }
-            if let Some(filter) = trace.filter.as_mut().filter(|f| !f.done) {
+            if let Some(filter) = trace.queries.filter.as_mut().filter(|f| !f.done) {
                 match filter.tick(&mut self.store, &trace.parser.info).await {
                     Ok(event) => events.push(event),
                     Err(error) => {
@@ -674,8 +733,9 @@ impl Engine {
                             message: error.to_string(),
                         });
                         let generation = filter.generation;
-                        trace.filter = None;
+                        trace.queries.filter = None;
                         if !trace
+                            .queries
                             .drawing
                             .as_ref()
                             .is_some_and(|d| d.generation == generation)
@@ -685,16 +745,17 @@ impl Engine {
                     }
                 }
             }
-            if let (Some(scan), Some(drawing)) =
-                (trace.drawing_scan.as_mut(), trace.drawing.as_ref())
-                && let Some(event) = scan
-                    .tick(&mut self.store, &trace.parser.info, drawing)
-                    .await?
+            if let (Some(scan), Some(drawing)) = (
+                trace.queries.drawing_scan.as_mut(),
+                trace.queries.drawing.as_ref(),
+            ) && let Some(event) = scan
+                .tick(&mut self.store, &trace.parser.info, drawing)
+                .await?
             {
                 events.push(event);
-                trace.drawing_scan = None;
+                trace.queries.drawing_scan = None;
             }
-            let Some(search) = trace.search.as_mut() else {
+            let Some(search) = trace.queries.search.as_mut() else {
                 continue;
             };
             if search.cursor >= search.pages.len() {
@@ -747,24 +808,31 @@ impl Engine {
         }
         Ok(events)
     }
+
     /// Whether at least one search or overview still needs worker time.
     pub fn has_search_work(&self) -> bool {
-        self.traces.values().any(|trace| {
-            trace
-                .search
-                .as_ref()
-                .is_some_and(|s| s.cursor < s.pages.len())
-                || trace.overview.is_some()
-                || trace.filter.as_ref().is_some_and(|f| !f.done)
-                || trace.drawing_scan.is_some()
-                || trace.sorting.as_ref().is_some_and(|r| !r.done)
-                || trace.suggestions.is_some()
-        })
+        self.traces
+            .values()
+            .map(|trace| &trace.queries)
+            .chain(self.analysis.values())
+            .any(|trace| {
+                trace
+                    .search
+                    .as_ref()
+                    .is_some_and(|s| s.cursor < s.pages.len())
+                    || trace.overview.is_some()
+                    || trace.filter.as_ref().is_some_and(|f| !f.done)
+                    || trace.drawing_scan.is_some()
+                    || trace.sorting.as_ref().is_some_and(|r| !r.done)
+                    || trace.suggestions.is_some()
+            })
     }
+
     /// Returns shared cache use.
     pub fn metrics(&self) -> (usize, usize) {
         self.store.metrics()
     }
+
     /// Returns status for one trace.
     pub fn info(&self, id: u32) -> Option<&TraceInfo> {
         self.traces.get(&id).map(|trace| &trace.parser.info)

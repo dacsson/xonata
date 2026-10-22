@@ -13,6 +13,7 @@ use xonata_core::{Engine, Event, Request};
 enum Command {
     Open(PathBuf),
     Request(Request),
+    Analysis(xonata_core::AnalysisRequest, crate::chat::AnalysisReply),
 }
 
 /// Native worker handle; the worker owns all trace data.
@@ -20,6 +21,7 @@ pub struct NativeTransport {
     commands: Sender<Command>,
     events: Receiver<Event>,
 }
+
 impl NativeTransport {
     /// Starts one background worker and a bounded viewport protocol.
     pub fn new(context: Context) -> Self {
@@ -29,6 +31,7 @@ impl NativeTransport {
         Self { commands, events }
     }
 }
+
 impl Transport for NativeTransport {
     fn open_dialog(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
@@ -43,22 +46,39 @@ impl Transport for NativeTransport {
             }
         }
     }
+
     fn open_paths(&mut self, paths: Vec<PathBuf>) {
         for path in paths {
             let _ = self.commands.send(Command::Open(path));
         }
     }
+
     fn request(&mut self, request: Request) {
         let _ = self.commands.send(Command::Request(request));
     }
+
+    fn analysis(
+        &mut self,
+        request: xonata_core::AnalysisRequest,
+        reply: crate::chat::AnalysisReply,
+    ) {
+        if let Err(error) = self.commands.send(Command::Analysis(request, reply))
+            && let Command::Analysis(_, reply) = error.0
+        {
+            let _ = reply.send(Err("Trace worker closed".into()));
+        }
+    }
+
     fn poll(&mut self) -> Vec<Event> {
         self.events.try_iter().take(256).collect()
     }
 }
+
 fn emit(tx: &Sender<Event>, ctx: &Context, event: Event) {
     let _ = tx.send(event);
     ctx.request_repaint();
 }
+
 fn worker(rx: Receiver<Command>, tx: Sender<Event>, ctx: Context) {
     let Ok(backing) = NativeBacking::new() else {
         emit(
@@ -98,6 +118,12 @@ fn worker(rx: Receiver<Command>, tx: Sender<Event>, ctx: Context) {
         }
         match rx.recv_timeout(Duration::from_millis(3)) {
             Ok(Command::Open(path)) => files.push_back(path),
+            Ok(Command::Analysis(request, reply)) => {
+                let result = futures_lite::future::block_on(engine.analysis_request(request))
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+                ctx.request_repaint();
+            }
             Ok(Command::Request(request)) => {
                 let id = request_trace(&request);
                 match futures_lite::future::block_on(engine.request(request)) {
@@ -135,6 +161,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Event>, ctx: Context) {
         }
     }
 }
+
 fn request_trace(request: &Request) -> u32 {
     match request {
         Request::Close { trace }
@@ -157,6 +184,7 @@ fn request_trace(request: &Request) -> u32 {
         | Request::FilterViewport { trace, .. } => *trace,
     }
 }
+
 fn load_file(
     path: &PathBuf,
     id: u32,
@@ -171,7 +199,11 @@ fn load_file(
     let mut data = vec![0u8; 64 * 1024];
     loop {
         while let Ok(command) = rx.try_recv() {
-            if let Command::Open(path) = command {
+            if let Command::Analysis(request, reply) = command {
+                let result = futures_lite::future::block_on(engine.analysis_request(request))
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            } else if let Command::Open(path) = command {
                 files.push_back(path);
             } else if let Command::Request(request) = command {
                 if matches!(request, Request::Close { trace } if trace == id) {
@@ -190,6 +222,11 @@ fn load_file(
                         },
                     ),
                 }
+            }
+        }
+        if engine.has_search_work() {
+            for event in futures_lite::future::block_on(engine.tick()).map_err(|e| e.to_string())? {
+                emit(tx, ctx, event);
             }
         }
         let n = file.read(&mut data).map_err(|e| e.to_string())?;
@@ -211,4 +248,67 @@ fn load_file(
         futures_lite::future::block_on(engine.finish(id)).map_err(|e| e.to_string())?,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_analysis_round_trips_without_consuming_viewer_events() {
+        let mut transport = NativeTransport::new(Context::default());
+        transport.open_paths(vec![
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../core/tests/fixtures/compressed.kanata"),
+        ]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if transport
+                .poll()
+                .iter()
+                .any(|e| matches!(e,Event::Info{info} if info.complete))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native worker did not load fixture"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (reply, receive) = futures::channel::oneshot::channel();
+        transport.analysis(
+            xonata_core::AnalysisRequest {
+                trace: 1,
+                session: 1,
+                request: 1,
+                action: xonata_core::AnalysisAction::Rows { start: 0, count: 1 },
+            },
+            reply,
+        );
+        let value = futures_lite::future::block_on(receive).unwrap().unwrap();
+        assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+        transport.request(Request::View {
+            trace: 1,
+            generation: 99,
+            start: 0,
+            stride: 1,
+            count: 1,
+            hide_flushed: false,
+        });
+        loop {
+            if transport
+                .poll()
+                .iter()
+                .any(|e| matches!(e, Event::View { generation: 99, .. }))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "analysis stole a viewer reply"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }

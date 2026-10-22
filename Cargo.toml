@@ -1,12 +1,12 @@
 [workspace]
-members = ["crates/core", "crates/view", "crates/app", "crates/web"]
+members = ["crates/core", "crates/view", "crates/app", "crates/web", "crates/agent"]
 default-members = ["crates/app"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.97.1"
 license = "BSD-3-Clause"
 
 [workspace.dependencies]
