@@ -8,3 +8,4 @@ pub mod chat;
 mod comments;
 mod filter_builder;
 mod filters;
+mod theme;

@@ -3,6 +3,7 @@ import {readFile, mkdir, writeFile} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {resolve, extname} from 'node:path';
 import assert from 'node:assert/strict';
+import {inflateSync} from 'node:zlib';
 
 const root = resolve(process.env.XONATA_WEB_ROOT || 'web');
 const base = process.env.XONATA_BASE_PATH || '/';
@@ -139,7 +140,28 @@ try {
   assert.deepEqual(errors,[]);
   await mkdir('target',{recursive:true});const screenshot=await call('Page.captureScreenshot',{format:'png'});
   await writeFile('target/browser-agent.png',Buffer.from(screenshot.data,'base64'));
-  console.log('Browser agent checks passed: connection UI, area selection/copy/paste, phase tools, exact cycles, history, cancellation, reconfiguration.');
+  await openChat();
+  const backgroundPixel=async(x=900,y=550)=>{
+    const result=await call('Page.captureScreenshot',{format:'png',clip:{x,y,width:1,height:1,scale:1}});
+    const png=Buffer.from(result.data,'base64'),chunks=[];
+    for(let offset=8;offset<png.length;){const length=png.readUInt32BE(offset);if(png.toString('ascii',offset+4,offset+8)==='IDAT')chunks.push(png.subarray(offset+8,offset+8+length));offset+=length+12;}
+    // A one-pixel PNG has no previous pixels or scanlines for its filter predictors.
+    return [...inflateSync(Buffer.concat(chunks)).subarray(1,4)];
+  };
+  await click(630,20);
+  await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:650,y:55});await sleep(350);
+  await click(850,72);await press('Escape',27);
+  await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:750,y:550});await sleep(250);
+  assert.deepEqual(await backgroundPixel(),[38,41,48],'Classic row background was not applied');
+  assert.deepEqual(await backgroundPixel(900,506),[45,48,54],'Classic upstream stripe was not applied');
+  assert.deepEqual(await backgroundPixel(990,550),[38,41,48],'Classic map background was not applied');
+  const classic=await call('Page.captureScreenshot',{format:'png'});
+  await writeFile('target/browser-classic.png',Buffer.from(classic.data,'base64'));
+  await click(630,20);
+  await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:650,y:55});await sleep(350);
+  await click(850,48);await press('Escape',27);await sleep(250);
+  assert.deepEqual(await backgroundPixel(),[19,23,29],'Dark (better!) theme was not applied');
+  console.log('Browser agent checks passed: themes, connection UI, area selection/copy/paste, phase tools, exact cycles, history, cancellation, reconfiguration.');
 } catch(error) {
   if(call){const screenshot=await call('Page.captureScreenshot',{format:'png'});await mkdir('target',{recursive:true});await writeFile('target/browser-agent-failure.png',Buffer.from(screenshot.data,'base64'));}
   throw error;

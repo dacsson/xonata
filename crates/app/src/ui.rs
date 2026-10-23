@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use crate::theme::COLORS;
+use crate::theme::Theme;
 use eframe::egui::{self, Color32, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use serde::{Deserialize, Serialize};
 use xonata_core::symbol;
@@ -22,16 +25,6 @@ pub(super) const MUTED: Color32 = Color32::from_rgb(143, 159, 174);
 pub(super) const ACCENT: Color32 = Color32::from_rgb(104, 183, 187);
 const FLUSHED_OPACITY: f32 = 0.22;
 const RULER_HEIGHT: f32 = 32.0;
-const COLORS: [Color32; 8] = [
-    Color32::from_rgb(93, 165, 180),
-    Color32::from_rgb(133, 132, 191),
-    Color32::from_rgb(184, 142, 107),
-    Color32::from_rgb(116, 169, 126),
-    Color32::from_rgb(168, 115, 139),
-    Color32::from_rgb(94, 135, 172),
-    Color32::from_rgb(164, 168, 104),
-    Color32::from_rgb(130, 155, 171),
-];
 
 /// Platform file picker, worker requests, and event polling.
 pub trait Transport {
@@ -74,6 +67,7 @@ pub trait Transport {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Preferences {
+    theme: Theme,
     sidebar: bool,
     sidebar_width: f32,
     hide_flushed: bool,
@@ -84,6 +78,7 @@ struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            theme: Theme::default(),
             sidebar: true,
             sidebar_width: 320.0,
             hide_flushed: false,
@@ -101,6 +96,7 @@ enum InspectorSection {
 }
 
 struct Tab {
+    theme: Theme,
     filters: crate::filters::Filters,
     info: TraceInfo,
     view: Viewport,
@@ -144,8 +140,16 @@ struct Tab {
 }
 
 impl Tab {
+    fn set_theme(&mut self, theme: Theme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.overview_texture = None;
+        }
+    }
+
     fn new(info: TraceInfo, prefs: &Preferences) -> Self {
         Self {
+            theme: prefs.theme,
             info,
             filters: crate::filters::Filters::default(),
             view: Viewport::default(),
@@ -328,8 +332,6 @@ pub struct Viewer {
     active: Option<u32>,
     split: Option<u32>,
     error: Option<String>,
-    jump_text: String,
-    jump_retired: bool,
     show_help: bool,
     prefs: Preferences,
     chats: crate::chat::Chats,
@@ -431,8 +433,6 @@ impl Viewer {
             active: None,
             split: None,
             error: None,
-            jump_text: String::new(),
-            jump_retired: false,
             show_help: false,
             prefs,
             chats: crate::chat::Chats::default(),
@@ -873,6 +873,20 @@ impl Viewer {
                     tab.overview = !tab.overview;
                 }
                 ui.menu_button("View", |ui| {
+                    ui.menu_button("Theme", |ui| {
+                        for (theme, label) in [
+                            (Theme::Xonata, "Dark (better!)"),
+                            (Theme::Classic, "Classic"),
+                        ] {
+                            if ui
+                                .selectable_value(&mut self.prefs.theme, theme, label)
+                                .clicked()
+                            {
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
                     if ui
                         .add_enabled(
                             self.tabs.len() > 1 || self.split.is_some(),
@@ -899,35 +913,6 @@ impl Viewer {
                         tab.last_view = None;
                         ui.close();
                     }
-                    ui.separator();
-                    ui.label(egui::RichText::new("Jump to instruction").color(MUTED));
-                    ui.horizontal(|ui| {
-                        let input = ui.add_sized(
-                            [100.0, 26.0],
-                            egui::TextEdit::singleline(&mut self.jump_text).hint_text("ID"),
-                        );
-                        egui::ComboBox::from_id_salt("jump-kind")
-                            .selected_text(if self.jump_retired { "RID" } else { "Op" })
-                            .width(55.0)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.jump_retired, false, "Op");
-                                ui.selectable_value(&mut self.jump_retired, true, "RID");
-                            });
-                        if ui.button("Go").clicked()
-                            || (input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
-                        {
-                            if let Ok(value) = self.jump_text.parse() {
-                                self.transport.request(Request::Jump {
-                                    trace: id,
-                                    id: value,
-                                    retired: self.jump_retired,
-                                });
-                                ui.close();
-                            } else {
-                                self.error = Some("Enter a nonnegative integer ID".into());
-                            }
-                        }
-                    });
                 });
                 if ui
                     .selectable_label(
@@ -1099,6 +1084,9 @@ impl eframe::App for Viewer {
                 ui.separator();
                 self.tabs(ui);
             });
+        for tab in &mut self.tabs {
+            tab.set_theme(self.prefs.theme);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
@@ -1325,6 +1313,7 @@ impl eframe::App for Viewer {
                                             "Filters → Results → Elapsed cycles",
                                         ),
                                         ("Draw filter results", "Filters → Draw"),
+                                        ("Trace theme", "View → Theme → Classic / Dark (better!)"),
                                         ("Next / previous match", "n / p"),
                                         ("Show this guide", "?"),
                                         ("Pan trace", "Drag / Shift+arrows (192 px per step)"),
@@ -1456,15 +1445,18 @@ fn draw_overview(ctx: &egui::Context, tab: &mut Tab, transport: &mut dyn Transpo
             height: 1024,
         });
     }
-    if let Some(raster) = tab.overview_raster.take() {
+    if tab.overview_texture.is_none()
+        && let Some(raster) = &tab.overview_raster
+    {
         let pixels = raster
             .pixels
             .iter()
             .map(|index| {
                 if *index == 0 {
-                    BG
+                    tab.theme.background()
                 } else {
-                    let color = COLORS[((index & 127).saturating_sub(1) as usize) % COLORS.len()];
+                    let stage = (index & 127).saturating_sub(1) as u32;
+                    let color = tab.theme.stage_color(stage);
                     if index & 128 != 0 {
                         color.gamma_multiply(FLUSHED_OPACITY)
                     } else {
@@ -1493,7 +1485,7 @@ fn draw_overview(ctx: &egui::Context, tab: &mut Tab, transport: &mut dyn Transpo
             ui.spacing_mut().item_spacing.y = 0.0;
             let (header, _) =
                 ui.allocate_exact_size(Vec2::new(width, RULER_HEIGHT), Sense::hover());
-            ui.painter().rect_filled(header, 0.0, PANEL);
+            ui.painter().rect_filled(header, 0.0, tab.theme.panel());
             ui.scope_builder(egui::UiBuilder::new().max_rect(header.shrink(4.0)), |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Map").small().color(MUTED));
@@ -1521,7 +1513,7 @@ fn draw_overview(ctx: &egui::Context, tab: &mut Tab, transport: &mut dyn Transpo
             let body = Rect::from_min_max(Pos2::new(left, canvas.top() + RULER_HEIGHT), canvas.max);
             let response = ui.allocate_rect(body, Sense::click_and_drag());
             let painter = ui.painter_at(body);
-            painter.rect_filled(body, 0.0, BG);
+            painter.rect_filled(body, 0.0, tab.theme.background());
             if let Some(texture) = &tab.overview_texture {
                 painter.image(
                     texture.id(),
@@ -1681,7 +1673,13 @@ fn draw_disassembly(
             let (panel, _) =
                 ui.allocate_exact_size(Vec2::new(width, canvas.height()), Sense::hover());
             let painter = ui.painter_at(panel);
-            painter.rect_filled(panel, 0.0, Color32::from_rgba_unmultiplied(22, 27, 34, 238));
+            let background = if tab.theme == Theme::Classic {
+                let color = tab.theme.panel();
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 238)
+            } else {
+                Color32::from_rgba_unmultiplied(22, 27, 34, 238)
+            };
+            painter.rect_filled(panel, 0.0, background);
             painter.vline(panel.right(), panel.y_range(), Stroke::new(1.0_f32, BORDER));
             let body = trace_rows_rect(panel);
             let header = Rect::from_min_max(panel.min, Pos2::new(panel.right(), body.top()));
@@ -1805,7 +1803,8 @@ fn draw_pipeline(
     }
     tab.ensure_view(transport, rect.size());
     let painter = ui.painter_at(rect);
-    ui.painter_at(canvas).rect_filled(canvas, 0.0, BG);
+    ui.painter_at(canvas)
+        .rect_filled(canvas, 0.0, tab.theme.background());
     if !tab.agent_area.dragging() {
         navigate_wheel(ui, tab, rect, response.hovered(), true);
     }
@@ -1952,7 +1951,7 @@ fn draw_pipeline(
                 .row_at(pos.y - rect.top() + tab.view.row_height * 0.5),
         });
     }
-    draw_grid(&ui.painter_at(canvas), canvas, &tab.view);
+    draw_grid(&ui.painter_at(canvas), canvas, &tab.view, tab.theme);
     let mut clicked = None;
     let mut lanes = Vec::new();
     for row in &tab.rows {
@@ -1983,19 +1982,19 @@ fn draw_pipeline(
             let gap = (tab.view.row_height * 0.1).min(4.0);
             let h = ((tab.view.row_height - gap * 2.0) / lanes.len().max(1) as f32).max(0.5);
             let top = y + gap + lane as f32 * h;
-            let block = Rect::from_min_max(
+            let slab = Rect::from_min_max(
                 Pos2::new(start + 1.0, top),
                 Pos2::new(
                     (end - 1.0).max(start + 2.0),
                     top + h - if lanes.len() > 1 { 1.0 } else { 0.0 },
                 ),
-            )
-            .intersect(rect);
+            );
+            let block = slab.intersect(rect);
             if !block.is_positive() {
                 continue;
             }
             let name = symbol(&tab.info.symbols, stage.name);
-            let color = COLORS[stage.name as usize % COLORS.len()];
+            let color = tab.theme.stage_color(stage.name);
             painter.rect_filled(
                 block,
                 0.0,
@@ -2006,7 +2005,12 @@ fn draw_pipeline(
                 },
             );
             let font = bold_font((h - 12.0).clamp(12.0, 17.0));
-            let label = painter.layout_no_wrap(name.to_owned(), font.clone(), BG);
+            let text_color = if tab.theme == Theme::Classic && op.flushed {
+                Color32::from_gray(120)
+            } else {
+                tab.theme.stage_text()
+            };
+            let label = painter.layout_no_wrap(name.to_owned(), font.clone(), text_color);
             let first_cell = Rect::from_min_max(
                 Pos2::new(start + 1.0, block.top()),
                 Pos2::new(start + tab.view.cycle_width - 1.0, block.bottom()),
@@ -2042,7 +2046,7 @@ fn draw_pipeline(
                                 Pos2::new(left, block.top()),
                                 Pos2::new(left, block.bottom()),
                             ],
-                            Stroke::new(0.7_f32, BG.gamma_multiply(0.28)),
+                            Stroke::new(0.7_f32, text_color.gamma_multiply(0.28)),
                         );
                     }
                     if cycle > stage.start
@@ -2051,7 +2055,7 @@ fn draw_pipeline(
                         && !name_rect.is_some_and(|name| name.expand(2.0).intersects(cell))
                     {
                         let text = (cycle - stage.start + 1).to_string();
-                        let text_color = BG.gamma_multiply(0.38);
+                        let text_color = text_color.gamma_multiply(0.38);
                         let label = painter.layout_no_wrap(text, font.clone(), text_color);
                         if label.size().x + 12.0 <= cell.width() {
                             painter.with_clip_rect(cell).galley(
@@ -2066,8 +2070,14 @@ fn draw_pipeline(
             if let Some(name_rect) = name_rect {
                 painter
                     .with_clip_rect(block)
-                    .galley(name_rect.min, label, BG);
+                    .galley(name_rect.min, label, text_color);
             }
+            crate::theme::stage_border(
+                &painter,
+                slab,
+                rect,
+                if op.flushed { FLUSHED_OPACITY } else { 1.0 },
+            );
             if !comments_block
                 && !comment_placement
                 && !selecting_area
@@ -2211,12 +2221,25 @@ fn draw_pipeline(
     canvas
 }
 
-fn draw_grid(painter: &egui::Painter, rect: Rect, view: &Viewport) {
+fn draw_grid(painter: &egui::Painter, rect: Rect, view: &Viewport, theme: Theme) {
     let rows = trace_rows_rect(rect);
+    // Below two pixels per row, alternating bands alias; keep the solid theme background.
+    if theme == Theme::Classic && view.row_height >= 2.0 {
+        for row in view.row_at(0.0)..=view.row_at(rows.height()) {
+            if let Some(color) = theme.row_background(row) {
+                let band = Rect::from_min_size(
+                    Pos2::new(rows.left(), rows.top() + view.y(row)),
+                    Vec2::new(rows.width(), view.row_height),
+                )
+                .intersect(rows);
+                painter.rect_filled(band, 0.0, color);
+            }
+        }
+    }
     painter.rect_filled(
         Rect::from_min_max(rect.min, Pos2::new(rect.right(), rows.top())),
         0.0,
-        PANEL,
+        theme.panel(),
     );
     painter.hline(rect.x_range(), rows.top(), Stroke::new(1.0_f32, BORDER));
     let step = (80.0 / view.cycle_width).ceil().max(1.0) as u64;
@@ -2651,7 +2674,10 @@ mod tests {
                 symbols: vec!["0".into(), "F".into()],
                 ..Default::default()
             },
-            &Preferences::default(),
+            &Preferences {
+                theme: Theme::Xonata,
+                ..Default::default()
+            },
         );
         tab.auto_center = false;
         tab.view.cycle = 100;
@@ -2926,8 +2952,6 @@ mod tests {
             active: Some(1),
             split: None,
             error: None,
-            jump_text: String::new(),
-            jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
             chats: crate::chat::Chats::default(),
@@ -2985,8 +3009,6 @@ mod tests {
                 active: Some(1),
                 split: None,
                 error: None,
-                jump_text: String::new(),
-                jump_retired: false,
                 show_help: false,
                 prefs: Preferences::default(),
                 chats: crate::chat::Chats::default(),
@@ -3042,8 +3064,6 @@ mod tests {
                     active: Some(1),
                     split: None,
                     error: (blocked == "error").then(|| "Test error".into()),
-                    jump_text: String::new(),
-                    jump_retired: false,
                     show_help: blocked == "help",
                     prefs: Preferences::default(),
                     chats: crate::chat::Chats::default(),
@@ -3122,8 +3142,6 @@ mod tests {
             active: Some(1),
             split: None,
             error: None,
-            jump_text: String::new(),
-            jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
             chats: crate::chat::Chats::default(),
@@ -3440,8 +3458,6 @@ mod tests {
             active: Some(1),
             split: None,
             error: None,
-            jump_text: String::new(),
-            jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
             chats: crate::chat::Chats::default(),
@@ -3575,8 +3591,6 @@ mod tests {
             active: Some(1),
             split: None,
             error: None,
-            jump_text: String::new(),
-            jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
             chats: crate::chat::Chats::default(),
@@ -3683,8 +3697,6 @@ mod tests {
             active: Some(1),
             split: None,
             error: None,
-            jump_text: String::new(),
-            jump_retired: false,
             show_help: false,
             prefs: Preferences::default(),
             chats: crate::chat::Chats::default(),
@@ -3853,6 +3865,151 @@ mod tests {
                 matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == "vE")
             }));
         }
+    }
+
+    #[test]
+    fn theme_changes_should_recolor_the_cached_overview_and_resizing_should_reuse_it() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.overview_requested = true;
+        tab.overview_raster = Some(OverviewRaster {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 2],
+        });
+        let first = render(&ctx, &mut tab, Vec::new());
+        let original = tab.overview_texture.as_ref().unwrap().id();
+        assert!(
+            first
+                .textures_delta
+                .set
+                .iter()
+                .any(|(id, _)| *id == original)
+        );
+        tab.overview_width += 40.0;
+        let resized = render(&ctx, &mut tab, Vec::new());
+        assert_eq!(tab.overview_texture.as_ref().unwrap().id(), original);
+        assert!(
+            !resized
+                .textures_delta
+                .set
+                .iter()
+                .any(|(id, _)| *id == original)
+        );
+        tab.set_theme(Theme::Classic);
+        let changed = render(&ctx, &mut tab, Vec::new());
+        let recolored = tab.overview_texture.as_ref().unwrap().id();
+        assert_ne!(original, recolored);
+        let image = &changed
+            .textures_delta
+            .set
+            .iter()
+            .find(|(id, _)| *id == recolored)
+            .unwrap()
+            .1
+            .image;
+        let egui::ImageData::Color(image) = image;
+        assert_eq!(
+            image.pixels,
+            [Theme::Classic.background(), Theme::Classic.stage_color(1)]
+        );
+        assert_eq!(tab.overview_raster.as_ref().unwrap().pixels, [0, 2]);
+        assert!(tab.overview_requested);
+    }
+
+    #[test]
+    fn classic_row_bands_should_follow_fractional_pan_and_zoom_without_subpixel_aliasing() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.theme = Theme::Classic;
+        tab.sidebar = false;
+        for (row, height) in [(0.0, 44.0), (3.35, 13.5), (10.2, 3.0), (10.2, 0.5)] {
+            tab.view.row = row;
+            tab.view.row_height = height;
+            let output = render(&ctx, &mut tab, Vec::new());
+            let bands: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Rect(rect)
+                        if rect.fill == Color32::from_rgb(45, 48, 54) =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if height < 2.0 {
+                assert!(bands.is_empty());
+                continue;
+            }
+            let rows = trace_rows_rect(tab.canvas_rect.unwrap());
+            assert!(bands.len() <= (rows.height() / height).ceil() as usize + 1);
+            for index in tab.view.row_at(0.0)..=tab.view.row_at(rows.height()) {
+                let y = rows.top() + tab.view.row_center(index);
+                if (rows.top()..rows.bottom()).contains(&y) {
+                    assert_eq!(
+                        bands
+                            .iter()
+                            .any(|band| band.contains(Pos2::new(rows.center().x, y))),
+                        index % 2 == 0
+                    );
+                }
+            }
+        }
+        assert!(Preferences::default().theme == Theme::Classic);
+        let saved: Preferences = serde_json::from_str(r#"{"theme":"Xonata"}"#).unwrap();
+        assert!(saved.theme == Theme::Xonata);
+    }
+
+    #[test]
+    fn classic_theme_should_preserve_geometry_and_use_light_stage_labels() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.sidebar = false;
+        let _ = render(&ctx, &mut tab, Vec::new());
+        let canvas = tab.canvas_rect;
+        let view = (
+            tab.view.cycle,
+            tab.view.row,
+            tab.view.cycle_width,
+            tab.view.row_height,
+        );
+        tab.theme = Theme::Classic;
+        let output = render(&ctx, &mut tab, Vec::new());
+        assert_eq!(tab.canvas_rect, canvas);
+        assert_eq!(
+            (
+                tab.view.cycle,
+                tab.view.row,
+                tab.view.cycle_width,
+                tab.view.row_height
+            ),
+            view
+        );
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::Rect(rect) if rect.fill == Theme::Classic.stage_color(1))));
+        let color = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.job.text == label => {
+                        Some(text.galley.job.sections[0].format.color)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(color("F"), Color32::from_gray(240));
+        assert!(color("2").a() < color("F").a());
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::LineSegment { stroke, .. } if stroke.width == 0.5)));
+        let old: Preferences = serde_json::from_str(r#"{"sidebar":false}"#).unwrap();
+        assert!(old.theme == Theme::Classic && !old.sidebar);
+        let saved = serde_json::to_string(&Preferences {
+            theme: Theme::Classic,
+            ..old
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<Preferences>(&saved).unwrap().theme == Theme::Classic);
     }
 
     #[test]

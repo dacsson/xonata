@@ -4,11 +4,11 @@
 
 - [x] Shift+arrows: pan by 192 pixels per step with held-key repeat; preserve editing and dialog shortcuts.
 - [ ] Recent files beside Open: bounded list, deduplicate, handle missing files. Decide native path persistence and browser permission/reopen behavior before implementation; browser file names alone cannot reopen local files.
-- [ ] Classic theme: inspect the local upstream Konata palette and add a small shared theme selector while retaining the current theme.
+- [x] Classic theme: default to Classic, with Dark (better!) available under View → Theme; preserve preferences and update the cached overview without rescanning.
 - [x] Increase vertical zoom: raise the row-height cap from 160 to 1024 pixels while preserving the zoom anchor.
 - [x] Extend horizontal zoom out: lower the minimum cycle width from 0.02 to 0.000002 pixels, allowing 10,000 times more compression.
-- [ ] Thin white stage borders: draw inside sufficiently large slabs, omit when too small; keep rendering bounded and check at fractional zoom.
-- [ ] Alternating row backgrounds: black/dark gray bands aligned with pipeline rows, consistent under pan/zoom and flushed-row filtering. Coordinate with Classic theme.
+- [x] Thin white stage borders: draw 0.5-pixel borders inside slabs at least 4 pixels wide/tall; omit when too small and preserve actual endpoints under viewport clipping.
+- [x] Alternating row backgrounds: Classic upstream Konata background and stripe colors follow the viewport row geometry under pan, zoom, and flushed-row filtering; suppress subpixel banding.
 
 Suggested order: keyboard pan and vertical zoom; Classic theme with borders and row backgrounds; recent files (platform-specific reopening).
 
