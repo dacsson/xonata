@@ -104,9 +104,13 @@ try {
   await openChat();
   await call('Input.dispatchKeyEvent',{type:'keyDown',key:'v',code:'KeyV',windowsVirtualKeyCode:86,modifiers:2});
   await call('Input.dispatchKeyEvent',{type:'keyUp',key:'v',code:'KeyV',windowsVirtualKeyCode:86});await sleep(200);
-  await submit('\nanalyze phases');
+  await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,modifiers:8});
+  await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,modifiers:8});await sleep(200);
+  assert.equal(requests.length,0,'Shift+Enter must insert a newline without sending');
+  await submit('analyze phases');
   await wait(()=>requests.length>=4,'phase tool round trips');await sleep(500);
   assert(JSON.stringify(requests[0].messages.findLast(m=>m.role==='user').content).includes('Operation IDs: 0–1'), 'Copied area was not pasted into the question');
+  assert(JSON.stringify(requests[0].messages.findLast(m=>m.role==='user').content).includes('\\nanalyze phases'), 'Shift+Enter newline was not preserved');
   const infoText=requests[1].messages.findLast(m=>m.role==='tool').content;
   const info=JSON.parse(typeof infoText==='string'?infoText:infoText.map(c=>c.text||'').join(''));
   assert.equal(info.data.first_cycle,'9007199254740993');

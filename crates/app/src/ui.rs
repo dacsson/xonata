@@ -1305,7 +1305,7 @@ impl eframe::App for Viewer {
                                         ("Search", "F / Ctrl+F"),
                                         (
                                             "Ask about the trace",
-                                            "Agent toolbar · Enter to send · Cancel to stop",
+                                            "Agent · Enter sends · Shift+Enter newline · Cancel stops",
                                         ),
                                         ("Filter builder / suggestions", "Filters → Query → ▾"),
                                         (

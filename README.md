@@ -102,7 +102,7 @@ Development and verification instructions are in [AGENTS.md](AGENTS.md). Bundled
 
 ## Trace analysis agent
 
-**Agent** opens a session-only conversation for the active trace after loading finishes. Enter or **Send** submits a question; **Cancel** stops the current analysis. Conversations retain follow-up context independently per tab. Closing the panel leaves its run active; closing its trace cancels the run. Text editing keeps canvas shortcuts inactive.
+**Agent** opens a session-only conversation for the active trace after loading finishes. Enter or **Send** submits a question; **Shift+Enter** inserts a newline in the four-line input; **Cancel** stops the current analysis. Conversations retain follow-up context independently per tab. Closing the panel leaves its run active; closing its trace cancels the run. Text editing keeps canvas shortcuts inactive.
 
 Expand **LiteLLM connection** in the chat window to enter the **Base URL**, **Model**, and masked **API key**, then click **Apply**. Base URL and Model start with editable example values (`http://localhost:4000/v1` and `rig-chat`); replace them with your endpoint and model. The API-key field starts empty. The section opens automatically when no connection is configured. Settings apply to every tab and stay in memory; **Apply** or **Clear connection** cancels active analyses across tabs. **Clear connection** also empties the key and resets the URL and model to their example values. Native environment settings and the browser host API remain supported and populate the same form.
 

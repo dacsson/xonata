@@ -349,9 +349,10 @@ impl Chats {
                 if !complete {
                     ui.label("Wait for trace loading to finish.");
                 }
+                let input_height = ui.text_style_height(&egui::TextStyle::Body) * 4.0 + 8.0;
                 egui::ScrollArea::vertical()
                     .id_salt((trace, "agent-history"))
-                    .max_height((ui.available_height() - 85.0).max(80.0))
+                    .max_height((ui.available_height() - input_height - 65.0).max(80.0))
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -368,12 +369,44 @@ impl Chats {
                         }
                     });
                 ui.label(&chat.status);
-                let input = ui.add_enabled(
-                    !chat.running,
-                    egui::TextEdit::singleline(&mut chat.input)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("Ask about this trace"),
-                );
+                let input = ui
+                    .scope(|ui| {
+                        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                        ui.spacing_mut().scroll.bar_width = 4.0;
+                        ui.spacing_mut().scroll.bar_inner_margin = 2.0;
+                        egui::ScrollArea::vertical()
+                            .id_salt((trace, "agent-input"))
+                            .max_height(input_height)
+                            .show(ui, |ui| {
+                                ui.add_enabled(
+                                    !chat.running,
+                                    egui::TextEdit::multiline(&mut chat.input)
+                                        .desired_rows(4)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Ask about this trace · Shift+Enter for newline")
+                                        .return_key(egui::KeyboardShortcut::new(
+                                            egui::Modifiers::SHIFT,
+                                            egui::Key::Enter,
+                                        )),
+                                )
+                            })
+                            .inner
+                    })
+                    .inner;
+                let enter = input.has_focus()
+                    && ui.input_mut(|input| {
+                        let event = input.events.iter().position(|event| {
+                            matches!(event,
+                        egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+                            if *modifiers == egui::Modifiers::NONE)
+                        });
+                        if let Some(index) = event {
+                            input.events.remove(index);
+                            true
+                        } else {
+                            false
+                        }
+                    });
                 if chat.focus_input {
                     if self.available() {
                         input.request_focus();
@@ -390,8 +423,7 @@ impl Chats {
                             egui::Button::new("Send"),
                         )
                         .clicked();
-                    if (send
-                        || (input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
+                    if (send || enter)
                         && complete
                         && !chat.running
                         && let Err(error) = self.start(trace, chat)
