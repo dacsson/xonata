@@ -44,6 +44,8 @@ pub(crate) struct ChatUpdate {
 
 pub(crate) struct Chats {
     config: Option<AgentConfig>,
+    draft: AgentConfig,
+    connection_error: Option<String>,
     next_run: u32,
     active: BTreeMap<u32, Active>,
     sender: mpsc::Sender<xonata_agent::PendingRequest>,
@@ -58,11 +60,18 @@ impl Default for Chats {
     fn default() -> Self {
         let (sender, requests) = xonata_agent::trace_channel();
         let (finish, finished) = mpsc::unbounded();
+        #[cfg(not(target_arch = "wasm32"))]
+        let config = AgentConfig::from_env();
+        #[cfg(target_arch = "wasm32")]
+        let config = None;
         Self {
-            #[cfg(not(target_arch = "wasm32"))]
-            config: AgentConfig::from_env(),
-            #[cfg(target_arch = "wasm32")]
-            config: None,
+            draft: config.clone().unwrap_or(AgentConfig {
+                base_url: "http://localhost:4000/v1".into(),
+                api_key: String::new(),
+                model: "rig-chat".into(),
+            }),
+            config,
+            connection_error: None,
             next_run: 0,
             active: BTreeMap::new(),
             sender,
@@ -93,7 +102,77 @@ impl Chats {
         for trace in traces {
             self.cancel(trace, transport);
         }
+        self.draft = config.clone().unwrap_or(AgentConfig {
+            base_url: "http://localhost:4000/v1".into(),
+            api_key: String::new(),
+            model: "rig-chat".into(),
+        });
+        self.connection_error = None;
         self.config = config;
+    }
+
+    fn apply_connection(&mut self, transport: &mut dyn Transport) -> Result<(), String> {
+        let config = AgentConfig {
+            base_url: self.draft.base_url.trim().to_owned(),
+            api_key: self.draft.api_key.trim().to_owned(),
+            model: self.draft.model.trim().to_owned(),
+        };
+        config.validate()?;
+        self.configure(Some(config), transport);
+        Ok(())
+    }
+
+    fn connection_settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        transport: &mut dyn Transport,
+        focus: bool,
+    ) -> bool {
+        let mut changed = false;
+        egui::CollapsingHeader::new("LiteLLM connection")
+            .default_open(!self.available())
+            .show(ui, |ui| {
+                ui.label("Shared across tabs · session only");
+                ui.label("Base URL");
+                let base_url = ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.base_url)
+                        .desired_width(f32::INFINITY),
+                );
+                if focus {
+                    base_url.request_focus();
+                }
+                ui.label("Model");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.model).desired_width(f32::INFINITY),
+                );
+                ui.label("API key");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.api_key)
+                        .desired_width(f32::INFINITY)
+                        .password(true),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        match self.apply_connection(transport) {
+                            Ok(()) => changed = true,
+                            Err(error) => self.connection_error = Some(error),
+                        }
+                    }
+                    if ui.button("Clear connection").clicked() {
+                        self.configure(None, transport);
+                        changed = true;
+                    }
+                    ui.label(if self.available() {
+                        "Configured"
+                    } else {
+                        "Not configured"
+                    });
+                });
+                if let Some(error) = &self.connection_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+        changed
     }
 
     pub fn cancel(&mut self, trace: u32, transport: &mut dyn Transport) {
@@ -246,11 +325,12 @@ impl Chats {
         chat: &mut Chat,
         canvas: Rect,
         transport: &mut dyn Transport,
-    ) {
+    ) -> bool {
         if !chat.open {
-            return;
+            return false;
         }
         let mut open = chat.open;
+        let mut connection_changed = false;
         egui::Window::new("Ask agent")
             .id(egui::Id::new((trace, "agent")))
             .open(&mut open)
@@ -261,6 +341,8 @@ impl Chats {
             .resizable(true)
             .constrain_to(canvas)
             .show(ctx, |ui| {
+                connection_changed =
+                    self.connection_settings(ui, transport, chat.focus_input && !self.available());
                 if !self.available() {
                     ui.label("Agent connection is not configured.");
                 }
@@ -293,7 +375,9 @@ impl Chats {
                         .hint_text("Ask about this trace"),
                 );
                 if chat.focus_input {
-                    input.request_focus();
+                    if self.available() {
+                        input.request_focus();
+                    }
                     chat.focus_input = false;
                 }
                 ui.horizontal(|ui| {
@@ -325,6 +409,7 @@ impl Chats {
                 });
             });
         chat.open = open;
+        connection_changed
     }
 }
 
@@ -403,6 +488,44 @@ mod tests {
                 .iter()
                 .all(|r| matches!(r.action, AnalysisAction::Cancel))
         );
+    }
+
+    #[test]
+    fn connection_edits_require_apply_and_invalid_values_preserve_active_runs() {
+        let mut chats = Chats::default();
+        let mut host = Host::default();
+        chats.configure(
+            Some(AgentConfig {
+                base_url: "http://localhost/v1".into(),
+                api_key: "original-key".into(),
+                model: "original-model".into(),
+            }),
+            &mut host,
+        );
+        chats.active.insert(1, active(10));
+        chats.draft.base_url = "${location.origin}/llm".into();
+        assert!(chats.apply_connection(&mut host).is_err());
+        assert_eq!(
+            chats.config.as_ref().unwrap().base_url,
+            "http://localhost/v1"
+        );
+        assert!(chats.active.contains_key(&1));
+        assert!(host.requests.is_empty());
+        chats.draft.base_url = "  http://127.0.0.1:8000/llm  ".into();
+        chats.draft.api_key = " new-key ".into();
+        chats.draft.model = " new-model ".into();
+        chats.apply_connection(&mut host).unwrap();
+        let config = chats.config.as_ref().unwrap();
+        assert_eq!(config.base_url, "http://127.0.0.1:8000/llm");
+        assert_eq!(config.api_key, "new-key");
+        assert_eq!(config.model, "new-model");
+        assert!(chats.active.is_empty());
+        assert!(matches!(host.requests[0].action, AnalysisAction::Cancel));
+        chats.configure(None, &mut host);
+        assert!(!chats.available());
+        assert!(chats.draft.api_key.is_empty());
+        assert_eq!(chats.draft.base_url, "http://localhost:4000/v1");
+        assert_eq!(chats.draft.model, "rig-chat");
     }
 
     #[test]

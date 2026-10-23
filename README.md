@@ -102,6 +102,8 @@ Development and verification instructions are in [AGENTS.md](AGENTS.md). Bundled
 
 **Agent** opens a session-only conversation for the active trace after loading finishes. Enter or **Send** submits a question; **Cancel** stops the current analysis. Conversations retain follow-up context independently per tab. Closing the panel leaves its run active; closing its trace cancels the run. Text editing keeps canvas shortcuts inactive.
 
+Expand **LiteLLM connection** in the chat window to enter the **Base URL**, **Model**, and masked **API key**, then click **Apply**. Base URL and Model start with editable example values (`http://localhost:4000/v1` and `rig-chat`); replace them with your endpoint and model. The API-key field starts empty. The section opens automatically when no connection is configured. Settings apply to every tab and stay in memory; **Apply** or **Clear connection** cancels active analyses across tabs. **Clear connection** also empties the key and resets the URL and model to their example values. Native environment settings and the browser host API remain supported and populate the same form.
+
 The agent uses Rig with an OpenAI-compatible chat-completions endpoint, including LiteLLM. Rust 1.97.1 or newer is required. For native use:
 
 ```sh
@@ -128,6 +130,36 @@ window.xonata.clear_agent_configuration();
 The standalone page's `viewer` name refers to the canvas element, not the application handle. Embedded hosts call these methods on their own `WebHandle` instance, as shown in the embedding example.
 
 Configuration and conversations stay in memory. Browser requests go directly to the configured endpoint, which must allow the page's origin through CORS. Keys supplied to a browser are accessible to that browser; use a session-scoped proxy credential. Trace snippets requested by tools are sent to the configured model endpoint. The standalone Pages site does not embed credentials or configure a backend automatically. See [the embedding example](web/embed-example.html).
+
+For local browser testing when the external endpoint does not allow CORS, use the Python 3.8+ standard-library proxy. Run from the repository root:
+
+```sh
+bash scripts/build-web.sh
+# Upstream origin only: no /v1, path prefix, or trailing slash.
+export XONATA_LITELLM_UPSTREAM='https://litellm.example.com'
+python3 scripts/agent-proxy.py
+```
+
+Open `http://localhost:8000` and enter `http://localhost:8000/llm/v1`, your model, and key under **Agent → LiteLLM connection → Apply**. Alternatively, configure the viewer in that page's console:
+
+```js
+window.xonata.configure_agent(JSON.stringify({
+  base_url: `${location.origin}/llm/v1`,
+  api_key: 'your-existing-litellm-key',
+  model: 'your-model',
+}));
+```
+
+The [local proxy script](scripts/agent-proxy.py) serves `web/` and strips `/llm` before forwarding GET/POST requests and their authorization header to the configured server. The viewer's `base_url` must point to the local `/llm` route, not the remote server. `location.origin` keeps requests on the page's origin even when opening `127.0.0.1` instead of `localhost`, so the upstream server needs no CORS change. If the upstream uses `/chat/completions` without `/v1`, use `${location.origin}/llm` as the viewer's base URL. The server defaults to IPv4 loopback; the key stays in the viewer's session configuration. Stop it with **Ctrl+C**. Use `--port 8001` to change the port, or `--upstream https://litellm.example.com` instead of the environment variable. This setup applies to the locally served page, not the GitHub Pages site. No Python packages are required.
+
+To serve from a VM on all IPv4 interfaces, stop any existing server on the chosen port and run:
+
+```sh
+python3 scripts/agent-proxy.py --port 80 --bind 0.0.0.0 \
+  --upstream https://litellm.example.com
+```
+
+Open `http://<vm-address>` and use the same `location.origin` configuration above. Binding port 80 may require permission to use privileged ports.
 
 Tools inspect trace metadata, unfiltered rows, operation stages and dependencies, instruction searches, and phase/interval queries with signed elapsed sorting. Agent queries share trace pages but have independent query state and temporary indexes, preserving viewer searches, filters, and drawings. Tools do not navigate or modify the viewer. Replies cite observed operation IDs and cycles; interpretation remains model-generated.
 

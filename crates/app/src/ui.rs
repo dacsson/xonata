@@ -1144,7 +1144,7 @@ impl eframe::App for Viewer {
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.info.id == id)
             && let Some(canvas) = tab.canvas_rect
         {
-            self.chats.show(
+            let connection_changed = self.chats.show(
                 ctx,
                 id,
                 tab.info.complete,
@@ -1152,6 +1152,12 @@ impl eframe::App for Viewer {
                 canvas,
                 &mut *self.transport,
             );
+            if connection_changed {
+                for tab in &mut self.tabs {
+                    tab.chat.running = false;
+                    tab.chat.status = "Agent configuration updated".into();
+                }
+            }
         }
         if let Some(tab) = self
             .active

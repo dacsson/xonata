@@ -15,6 +15,7 @@ const server = createServer(async (req,res) => {
   try {
     const path = new URL(req.url,'http://localhost').pathname;
     if (path === '/v1/chat/completions') {
+      assert.equal(req.headers.authorization,'Bearer mock-session-key');
       const chunks=[]; for await (const chunk of req) chunks.push(chunk);
       const body=JSON.parse(Buffer.concat(chunks)); requests.push(body);
       const content=[...body.messages].reverse().find(m=>m.role==='user')?.content;
@@ -65,7 +66,6 @@ try {
   await evaluate(`(async()=>{
     const canvas=document.querySelector('canvas');window.__agentTraceReady=false;
     canvas.addEventListener('xonata:trace',e=>{if(JSON.parse(e.detail).info.complete)window.__agentTraceReady=true;});
-    window.xonata.configure_agent(JSON.stringify({base_url:${JSON.stringify(origin+'/v1')},api_key:'mock-session-key',model:'mock'}));
     await window.xonata.open_file(new File(['Kanata\\t0004\\nC=\\t9007199254740993\\nI\\t0\\t0\\t0\\nL\\t0\\t0\\talpha\\nS\\t0\\t0\\tE\\nC\\t2\\nE\\t0\\t0\\tE\\nR\\t0\\t0\\t0\\nI\\t1\\t1\\t0\\nL\\t1\\t0\\tbeta\\nS\\t1\\t0\\tE\\nC\\t4\\nE\\t1\\t0\\tE\\nR\\t1\\t1\\t0\\n'],'agent.kanata'));
   })()`);
   await wait(()=>evaluate('window.__agentTraceReady'),'trace loading');await sleep(350);
@@ -73,6 +73,16 @@ try {
   // Ask agent follows the existing View toolbar control.
   const openChat=()=>click(700,20);
   const submit=async text=>{await call('Input.insertText',{text});await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});};
+  // Configure from the chat form without the console API; opening an unconfigured chat focuses Base URL.
+  const press=async(key,virtualKey)=>{await call('Input.dispatchKeyEvent',{type:'keyDown',key,windowsVirtualKeyCode:virtualKey});await call('Input.dispatchKeyEvent',{type:'keyUp',key,windowsVirtualKeyCode:virtualKey});await sleep(100);};
+  const replaceField=async text=>{await call('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});await call('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});await call('Input.insertText',{text});};
+  await openChat();
+  await replaceField(origin+'/v1');
+  await press('Tab',9);await replaceField('mock');
+  await press('Tab',9);await call('Input.insertText',{text:'mock-session-key'});
+  await press('Tab',9);await press(' ',32);
+  await openChat();
+  assert.equal(requests.length,0,'Applying connection settings must not call the model');
   // Copy a selected area through the actual browser clipboard, then paste into chat.
   await call('Browser.grantPermissions',{origin,permissions:['clipboardReadWrite','clipboardSanitizedWrite']});
   await evaluate('navigator.clipboard.writeText("")');
@@ -129,7 +139,7 @@ try {
   assert.deepEqual(errors,[]);
   await mkdir('target',{recursive:true});const screenshot=await call('Page.captureScreenshot',{format:'png'});
   await writeFile('target/browser-agent.png',Buffer.from(screenshot.data,'base64'));
-  console.log('Browser agent checks passed: area selection/copy/paste, phase tools, exact cycles, history, cancellation, reconfiguration.');
+  console.log('Browser agent checks passed: connection UI, area selection/copy/paste, phase tools, exact cycles, history, cancellation, reconfiguration.');
 } catch(error) {
   if(call){const screenshot=await call('Page.captureScreenshot',{format:'png'});await mkdir('target',{recursive:true});await writeFile('target/browser-agent-failure.png',Buffer.from(screenshot.data,'base64'));}
   throw error;
