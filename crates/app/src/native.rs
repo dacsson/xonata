@@ -165,6 +165,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Event>, ctx: Context) {
 fn request_trace(request: &Request) -> u32 {
     match request {
         Request::Close { trace }
+        | Request::AreaBounds { trace, .. }
         | Request::View { trace, .. }
         | Request::Search { trace, .. }
         | Request::CancelSearch { trace }

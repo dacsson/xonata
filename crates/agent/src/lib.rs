@@ -1,4 +1,5 @@
 //! Bounded, provider-backed trace analysis. Hosts own scheduling and trace data.
+mod knowledge;
 mod tools;
 
 use futures::channel::{mpsc, oneshot};

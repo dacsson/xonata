@@ -139,6 +139,41 @@ impl Engine {
                 self.close(trace).await?;
                 Ok(None)
             }
+            Request::AreaBounds {
+                trace,
+                generation,
+                start,
+                end,
+                hide_flushed,
+            } => {
+                let bounds = self
+                    .traces
+                    .get(&trace)
+                    .filter(|t| t.parser.info.complete)
+                    .and_then(|_| {
+                        let first_id = self
+                            .store
+                            .visible_ids(trace, start.min(end), 1, 1, hide_flushed)
+                            .first()?
+                            .1;
+                        let last_id = self
+                            .store
+                            .visible_ids(trace, start.max(end), 1, 1, hide_flushed)
+                            .first()?
+                            .1;
+                        Some(crate::AreaBounds {
+                            first_id,
+                            last_id,
+                            first_row: self.store.row_of(trace, first_id)?,
+                            last_row: self.store.row_of(trace, last_id)?,
+                        })
+                    });
+                Ok(Some(Event::AreaBounds {
+                    trace,
+                    generation,
+                    bounds,
+                }))
+            }
             Request::View {
                 trace,
                 generation,

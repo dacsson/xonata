@@ -238,6 +238,23 @@ pub struct OverviewRaster {
     pub pixels: Vec<u8>,
 }
 
+/// Inclusive operation and unfiltered row bounds for an agent area selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaBounds {
+    /// First operation ID; IDs inside the interval may have gaps.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub first_id: u64,
+    /// Last operation ID.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub last_id: u64,
+    /// First unfiltered row, indexed from zero.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub first_row: u64,
+    /// Last unfiltered row, indexed from zero.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub last_row: u64,
+}
+
 /// Commands shared by native and browser workers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -246,6 +263,21 @@ pub enum Request {
     Close {
         /// Trace ID.
         trace: u32,
+    },
+    /// Resolves two displayed row endpoints without decoding the selected area.
+    AreaBounds {
+        /// Trace ID.
+        trace: u32,
+        /// Selection generation.
+        generation: u32,
+        /// First displayed row, indexed from zero.
+        #[serde(with = "crate::filter::decimal_u64")]
+        start: u64,
+        /// Last displayed row, indexed from zero.
+        #[serde(with = "crate::filter::decimal_u64")]
+        end: u64,
+        /// Displayed rows exclude flushed operations.
+        hide_flushed: bool,
     },
     /// Retrieves only visible rows, sampling when zoomed out.
     View {
@@ -425,6 +457,15 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    /// Resolved agent area endpoints; absent for empty or unavailable rows.
+    AreaBounds {
+        /// Trace ID.
+        trace: u32,
+        /// Selection generation.
+        generation: u32,
+        /// Exact operation and unfiltered row bounds.
+        bounds: Option<AreaBounds>,
+    },
     /// Updated trace information.
     Info {
         /// Trace status.

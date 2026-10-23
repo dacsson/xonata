@@ -424,3 +424,95 @@ fn analysis_phase_pairing_preserves_signed_gaps_and_strict_exclusions() {
         assert_eq!(call(&mut engine, 1, A::Status).await["filter_total"], "0");
     });
 }
+
+#[test]
+fn area_bounds_resolve_sparse_ids_and_filtered_rows_without_viewport_sampling() {
+    block_on(async {
+        let mut engine = Engine::new(Box::<Memory>::default());
+        engine.open(1, "area.kanata".into()).await.unwrap();
+        let first = 9_007_199_254_740_993_u64;
+        let text = format!(
+            "Kanata\t0004\nC=\t{first}\nI\t{first}\t0\t0\nR\t{first}\t0\t1\nI\t{}\t1\t0\nR\t{}\t1\t0\nI\t{}\t2\t0\nR\t{}\t2\t1\nI\t{}\t3\t0\nR\t{}\t3\t0\n",
+            first + 2,
+            first + 2,
+            first + 5,
+            first + 5,
+            first + 9,
+            first + 9,
+        );
+        engine.feed(1, text.as_bytes()).await.unwrap();
+        engine.finish(1).await.unwrap();
+        let request = Request::AreaBounds {
+            trace: 1,
+            generation: 7,
+            start: 1,
+            end: 0,
+            hide_flushed: true,
+        };
+        let event = engine.request(request).await.unwrap().unwrap();
+        let expected = xonata_core::AreaBounds {
+            first_id: first + 2,
+            last_id: first + 9,
+            first_row: 1,
+            last_row: 3,
+        };
+        assert!(
+            matches!(event, Event::AreaBounds { trace: 1, generation: 7, bounds: Some(bounds) } if bounds == expected)
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["bounds"]["first_id"], (first + 2).to_string());
+        assert_eq!(json["bounds"]["last_id"], (first + 9).to_string());
+        let unfiltered = Request::AreaBounds {
+            trace: 1,
+            generation: 8,
+            start: 0,
+            end: 1,
+            hide_flushed: false,
+        };
+        let event = engine.request(unfiltered).await.unwrap().unwrap();
+        assert!(
+            matches!(event, Event::AreaBounds { bounds: Some(bounds), .. } if bounds.first_id == first && bounds.last_id == first + 2 && bounds.last_row == 1)
+        );
+    });
+}
+
+#[test]
+fn area_bounds_reject_empty_loading_closed_and_out_of_range_rows() {
+    block_on(async {
+        let mut engine = Engine::new(Box::<Memory>::default());
+        engine.open(1, "empty.kanata".into()).await.unwrap();
+        engine.feed(1, b"Kanata\t0004\nC=\t0\n").await.unwrap();
+        for complete in [false, true] {
+            if complete {
+                engine.finish(1).await.unwrap();
+            }
+            let event = engine
+                .request(Request::AreaBounds {
+                    trace: 1,
+                    generation: 1,
+                    start: 0,
+                    end: 0,
+                    hide_flushed: false,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(event, Event::AreaBounds { bounds: None, .. }));
+        }
+        let (mut engine, _) = loaded(2).await;
+        for trace in [1, 99] {
+            let event = engine
+                .request(Request::AreaBounds {
+                    trace,
+                    generation: 1,
+                    start: 0,
+                    end: 2,
+                    hide_flushed: false,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(event, Event::AreaBounds { bounds: None, .. }));
+        }
+    });
+}

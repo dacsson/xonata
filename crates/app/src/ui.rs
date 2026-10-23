@@ -125,6 +125,7 @@ struct Tab {
     comments: crate::comments::Comments,
     markers: Vec<Marker>,
     marker_drag: Option<usize>,
+    agent_area: crate::agent_area::AgentArea,
     wrap_result: Option<bool>,
     pending_reveal: Option<u64>,
     search_open: bool,
@@ -169,6 +170,7 @@ impl Tab {
             comments: crate::comments::Comments::default(),
             markers: Vec::new(),
             marker_drag: None,
+            agent_area: crate::agent_area::AgentArea::default(),
             wrap_result: None,
             pending_reveal: None,
             search_open: false,
@@ -462,6 +464,15 @@ impl Viewer {
                     self.active = Some(id);
                 }
             }
+            Event::AreaBounds {
+                trace,
+                generation,
+                bounds,
+            } => {
+                if let Some(tab) = self.tab_mut(trace) {
+                    tab.agent_area.resolve(generation, bounds);
+                }
+            }
             Event::View {
                 trace,
                 generation,
@@ -663,6 +674,13 @@ impl Viewer {
                 .and_then(|id| self.tabs.iter().find(|tab| tab.info.id == id))
                 .is_some_and(|tab| tab.search_open || tab.wrap_result.is_some());
         let comment = canvas_shortcuts && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C));
+        if canvas_shortcuts
+            && let Some(id) = self.active
+            && let Some(tab) = self.tab_mut(id)
+            && !tab.comments.placing
+        {
+            tab.agent_area.escape(ctx);
+        }
         let cancel_comment = ctx.input_mut(|i| {
             if canvas_shortcuts
                 && self
@@ -1300,6 +1318,8 @@ impl eframe::App for Viewer {
                                         ),
                                         ("Remove comment", "Hover bubble + Delete"),
                                         ("Place marker", "Shift+click"),
+                                        ("Copy area for agent", "Ctrl+drag, then Copy for agent"),
+                                        ("Clear agent area", "Esc / Clear"),
                                         ("Move marker", "Drag marker"),
                                         ("Remove marker", "Hover marker + Delete"),
                                         ("Clear markers", "Inspector → Clear markers"),
@@ -1762,7 +1782,9 @@ fn draw_pipeline(
     tab.ensure_view(transport, rect.size());
     let painter = ui.painter_at(rect);
     ui.painter_at(canvas).rect_filled(canvas, 0.0, BG);
-    navigate_wheel(ui, tab, rect, response.hovered(), true);
+    if !tab.agent_area.dragging() {
+        navigate_wheel(ui, tab, rect, response.hovered(), true);
+    }
     let cursor = response
         .hover_pos()
         .or_else(|| response.interact_pointer_pos());
@@ -1786,6 +1808,27 @@ fn draw_pipeline(
         .prepare(ui, &tab.view, rect, label_clip, tab.info.id);
     let comment_placement = tab.comments.placing;
     let comments_block = tab.comments.editing() || bubbles.hovered;
+    let area_was_dragging = tab.agent_area.dragging();
+    let area_request = tab.agent_area.interact(
+        ui,
+        &response,
+        &crate::agent_area::AreaInput {
+            view: &tab.view,
+            rect,
+            clip: label_clip,
+            info: &tab.info,
+            hide_flushed: tab.hide_flushed,
+            blocked: comments_block || comment_placement,
+        },
+    );
+    let selecting_area = area_was_dragging || tab.agent_area.dragging() || area_request.is_some();
+    if let Some(request) = area_request {
+        transport.request(request);
+    }
+    if selecting_area {
+        tab.auto_center = false;
+        tab.marker_drag = None;
+    }
     if comment_placement {
         response
             .clone()
@@ -1837,14 +1880,14 @@ fn draw_pipeline(
                 .iter()
                 .any(|marker| marker_pos(*marker).distance(pos) <= 10.0)
         });
-    if response.drag_started() && !comments_block && !comment_placement {
+    if response.drag_started() && !comments_block && !comment_placement && !selecting_area {
         tab.marker_drag = ui.input(|i| i.pointer.press_origin()).and_then(|pos| {
             tab.markers
                 .iter()
                 .position(|marker| marker_pos(*marker).distance(pos) <= 10.0)
         });
     }
-    if response.dragged() && !comments_block && !comment_placement {
+    if response.dragged() && !comments_block && !comment_placement && !selecting_area {
         tab.auto_center = false;
         if let (Some(index), Some(pos)) = (tab.marker_drag, cursor) {
             tab.markers[index] = Marker {
@@ -2003,6 +2046,8 @@ fn draw_pipeline(
             }
             if !comments_block
                 && !comment_placement
+                && !selecting_area
+                && !ui.input(|i| i.modifiers.ctrl)
                 && cursor.is_some_and(|pos| block.contains(pos))
             {
                 let end = stage.end.unwrap_or(tab.info.last_cycle.saturating_add(1));
@@ -2110,6 +2155,17 @@ fn draw_pipeline(
         );
     }
     bubbles.paint(&painter, label_clip);
+    tab.agent_area.show(
+        ui,
+        &crate::agent_area::AreaInput {
+            view: &tab.view,
+            rect,
+            clip: label_clip,
+            info: &tab.info,
+            hide_flushed: tab.hide_flushed,
+            blocked: comments_block || comment_placement,
+        },
+    );
     if tab.comments.placing {
         painter.with_clip_rect(label_clip).text(
             label_clip.center_bottom() - Vec2::new(0.0, 16.0),
@@ -2734,6 +2790,89 @@ mod tests {
             (tab.markers[0], tab.view.cycle, tab.view.row),
             (Marker { cycle: 104, row: 4 }, 100, 0.0)
         );
+    }
+
+    #[test]
+    fn agent_area_drag_should_preserve_pan_and_markers_after_ctrl_is_released() {
+        let (ctx, mut tab) = context_and_tab();
+        tab.sidebar = false;
+        let base = 9_007_199_254_740_993;
+        tab.view.cycle = base;
+        tab.info.first_cycle = base;
+        tab.info.last_cycle = base + 10;
+        let marker = Marker {
+            cycle: base + 4,
+            row: 4,
+        };
+        tab.markers.push(marker);
+        let mut transport = RecordingTransport::default();
+        let mut frame = |tab: &mut Tab, modifiers, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 640.0))),
+                    modifiers,
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ctx, |ui| {
+                            draw_tab(ui, tab, &mut transport);
+                        });
+                },
+            )
+        };
+        let start = Pos2::new(288.0, 208.0);
+        let end = Pos2::new(144.0, 120.0);
+        let _ = frame(
+            &mut tab,
+            Modifiers::CTRL,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        let _ = frame(
+            &mut tab,
+            Modifiers::CTRL,
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::CTRL,
+            }],
+        );
+        let _ = frame(
+            &mut tab,
+            Modifiers::CTRL,
+            vec![egui::Event::PointerMoved(Pos2::new(250.0, 180.0))],
+        );
+        let _ = frame(
+            &mut tab,
+            Modifiers::NONE,
+            vec![egui::Event::PointerMoved(end)],
+        );
+        let _ = frame(
+            &mut tab,
+            Modifiers::NONE,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        assert_eq!(
+            (tab.view.cycle, tab.view.row, tab.markers[0]),
+            (base, 0.0, marker)
+        );
+        assert!(transport.0.iter().any(|request| matches!(
+            request,
+            Request::AreaBounds {
+                start: 2,
+                end: 4,
+                ..
+            }
+        )));
+        assert!(tab.selected.is_none());
     }
 
     #[test]

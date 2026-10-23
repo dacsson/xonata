@@ -3,6 +3,7 @@
 pub mod native;
 pub mod ui;
 
+mod agent_area;
 pub mod chat;
 mod comments;
 mod filter_builder;

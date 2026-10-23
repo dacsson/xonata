@@ -165,6 +165,15 @@ fn compatible_model_executes_tools_and_receives_role_aware_followup_context() {
     server.join().unwrap();
     let requests = recorded.lock().unwrap();
     assert_eq!(requests.len(), 3);
+    for request in requests.iter() {
+        let messages = request["messages"].to_string();
+        assert!(
+            !messages.contains(
+                "https://github.com/shioyadan/Konata/blob/master/docs/kanata-log-format.md"
+            ),
+            "Unused specifications must not enter model context"
+        );
+    }
     assert!(
         requests[1]["messages"]
             .as_array()
@@ -179,6 +188,71 @@ fn compatible_model_executes_tools_and_receives_role_aware_followup_context() {
         )
     );
     assert_eq!(requests[0]["model"], "mock");
+}
+
+#[test]
+fn specifications_are_read_on_demand_without_retaining_pages_in_followups() {
+    let (config, recorded, server) = provider(vec![
+        (
+            200,
+            answer(
+                json!({"role":"assistant","content":null,"tool_calls":[{"id":"spec-1","type":"function","function":{"name":"read_specification","arguments":"{\"id\":\"kanata-trace\"}"}}]}),
+                "tool_calls",
+            ),
+        ),
+        (
+            200,
+            answer(
+                json!({"role":"assistant","content":"Kanata uses tab-delimited records."}),
+                "stop",
+            ),
+        ),
+        (
+            200,
+            answer(
+                json!({"role":"assistant","content":"The specification describes the format."}),
+                "stop",
+            ),
+        ),
+    ]);
+    runtime().block_on(async {
+        let question = Message {
+            role: Role::User,
+            text: "Explain the Kanata format".into(),
+        };
+        let first = turn(config.clone(), vec![question.clone()]).await.unwrap();
+        turn(
+            config,
+            vec![
+                question,
+                Message {
+                    role: Role::Assistant,
+                    text: first,
+                },
+                Message {
+                    role: Role::User,
+                    text: "Continue".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    });
+    server.join().unwrap();
+    let requests = recorded.lock().unwrap();
+    let source = "https://github.com/shioyadan/Konata/blob/master/docs/kanata-log-format.md";
+    assert!(!requests[0]["messages"].to_string().contains(source));
+    let tools = requests[0]["tools"].to_string();
+    assert!(tools.contains("read_specification") && tools.contains("Kanata trace"));
+    assert!(!tools.contains(source));
+    assert!(
+        requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["role"] == "tool" && m["content"].to_string().contains(source))
+    );
+    assert!(!requests[2]["messages"].to_string().contains(source));
 }
 
 #[test]

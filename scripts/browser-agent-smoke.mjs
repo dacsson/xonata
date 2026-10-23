@@ -26,6 +26,9 @@ const server = createServer(async (req,res) => {
       }
       if (question==='follow up') response=completion({role:'assistant',content:'The earlier answer used observed phase durations.'});
       else if (question==='after cancellation') response=completion({role:'assistant',content:'Fresh run completed.'});
+      else if (question==='explain format') response=body.messages.at(-1).role==='tool'
+        ? completion({role:'assistant',content:'Kanata uses tab-delimited records.'})
+        : tool('read_specification',{id:'kanata-trace'});
       else if (requests.length===1) response=tool('trace_info',{});
       else if (requests.length===2) response=tool('phase_help',{});
       else if (requests.length===3) response=tool('query_phases',{text:'phase=E',descending:true});
@@ -70,8 +73,29 @@ try {
   // Ask agent follows the existing View toolbar control.
   const openChat=()=>click(700,20);
   const submit=async text=>{await call('Input.insertText',{text});await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});};
-  await openChat();await submit('analyze phases');
+  // Copy a selected area through the actual browser clipboard, then paste into chat.
+  await call('Browser.grantPermissions',{origin,permissions:['clipboardReadWrite','clipboardSanitizedWrite']});
+  await evaluate('navigator.clipboard.writeText("")');
+  await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:370,y:130,modifiers:2});
+  await call('Input.dispatchMouseEvent',{type:'mousePressed',x:370,y:130,button:'left',clickCount:1,modifiers:2});
+  await call('Input.dispatchMouseEvent',{type:'mouseMoved',x:650,y:190,button:'left',buttons:1,modifiers:2});await sleep(100);
+  await call('Input.dispatchMouseEvent',{type:'mouseReleased',x:650,y:190,button:'left',clickCount:1,modifiers:2});await sleep(400);
+  await mkdir('target',{recursive:true});
+  const areaScreenshot=await call('Page.captureScreenshot',{format:'png'});
+  await writeFile('target/browser-agent-area.png',Buffer.from(areaScreenshot.data,'base64'));
+  await click(350,await evaluate('innerHeight - 65'));
+  const area=await evaluate('navigator.clipboard.readText()');
+  assert(area.includes('Cycles: 9007199254740993–9007199254740997 (inclusive).'),area);
+  assert(area.includes('Operation IDs: 0–1 (inclusive interval; IDs may have gaps).'),area);
+  assert(area.includes('Unfiltered rows: 0–1 (inclusive, zero-based).'),area);
+  await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await openChat();
+  await call('Input.dispatchKeyEvent',{type:'keyDown',key:'v',code:'KeyV',windowsVirtualKeyCode:86,modifiers:2});
+  await call('Input.dispatchKeyEvent',{type:'keyUp',key:'v',code:'KeyV',windowsVirtualKeyCode:86});await sleep(200);
+  await submit('\nanalyze phases');
   await wait(()=>requests.length>=4,'phase tool round trips');await sleep(500);
+  assert(JSON.stringify(requests[0].messages.findLast(m=>m.role==='user').content).includes('Operation IDs: 0–1'), 'Copied area was not pasted into the question');
   const infoText=requests[1].messages.findLast(m=>m.role==='tool').content;
   const info=JSON.parse(typeof infoText==='string'?infoText:infoText.map(c=>c.text||'').join(''));
   assert.equal(info.data.first_cycle,'9007199254740993');
@@ -93,10 +117,19 @@ try {
   const finalQuestion=requests[6].messages.findLast(m=>m.role==='user').content;
   assert(JSON.stringify(finalQuestion).includes('after cancellation'));
   assert(!requests[6].messages.some(m=>m.role==='assistant'&&JSON.stringify(m.content).includes('cancel this run')));
+  const source='https://github.com/shioyadan/Konata/blob/master/docs/kanata-log-format.md';
+  assert(requests.every(request=>!JSON.stringify(request.messages).includes(source)), 'Unused knowledge entered model context');
+  await openChat();await openChat();await submit('explain format');
+  await wait(()=>requests.length>=9,'on-demand specification');await sleep(500);
+  assert(!JSON.stringify(requests[7].messages).includes(source));
+  assert(JSON.stringify(requests[8].messages.findLast(m=>m.role==='tool')).includes(source), 'Requested knowledge missing');
+  await openChat();await openChat();await submit('follow up');
+  await wait(()=>requests.length>=10,'follow-up after specification');await sleep(300);
+  assert(!JSON.stringify(requests[9].messages).includes(source), 'Retrieved pages persisted into follow-up');
   assert.deepEqual(errors,[]);
   await mkdir('target',{recursive:true});const screenshot=await call('Page.captureScreenshot',{format:'png'});
   await writeFile('target/browser-agent.png',Buffer.from(screenshot.data,'base64'));
-  console.log('Browser agent checks passed: phase tools, exact cycles, history, cancellation, reconfiguration.');
+  console.log('Browser agent checks passed: area selection/copy/paste, phase tools, exact cycles, history, cancellation, reconfiguration.');
 } catch(error) {
   if(call){const screenshot=await call('Page.captureScreenshot',{format:'png'});await mkdir('target',{recursive:true});await writeFile('target/browser-agent-failure.png',Buffer.from(screenshot.data,'base64'));}
   throw error;

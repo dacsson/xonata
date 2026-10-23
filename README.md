@@ -54,6 +54,7 @@ python3 -m http.server 8000 --directory target/pages
 | Vertical zoom in / out | **Ctrl+Up / Ctrl+Down** |
 | Zoom both axes / pan / scroll | **Ctrl+wheel** or pinch / drag / wheel |
 | Place / move / remove marker | **Shift+click** / drag its dot / hover its dot and press **Delete** |
+| Copy an area for an agent question | **Ctrl+drag** on the timeline, then **Copy for agent**; **Esc** or **Clear** removes the selection |
 | Place / edit comment | **C**, then click the trace / click its bubble |
 | Save / newline / cancel comment | **Enter / Shift+Enter / Esc** |
 | Remove comment | Hover its bubble and press **Delete**, or use **Delete** in its editor |
@@ -128,6 +129,10 @@ The standalone page's `viewer` name refers to the canvas element, not the applic
 Configuration and conversations stay in memory. Browser requests go directly to the configured endpoint, which must allow the page's origin through CORS. Keys supplied to a browser are accessible to that browser; use a session-scoped proxy credential. Trace snippets requested by tools are sent to the configured model endpoint. The standalone Pages site does not embed credentials or configure a backend automatically. See [the embedding example](web/embed-example.html).
 
 Tools inspect trace metadata, unfiltered rows, operation stages and dependencies, instruction searches, and phase/interval queries with signed elapsed sorting. Agent queries share trace pages but have independent query state and temporary indexes, preserving viewer searches, filters, and drawings. Tools do not navigate or modify the viewer. Replies cite observed operation IDs and cycles; interpretation remains model-generated.
+
+The agent's bundled knowledge base currently contains a [Kanata trace description](crates/agent/knowledge/kanata-trace.md), summarized from the upstream format specification with its source link. Only titles and IDs are advertised in the `read_specification` tool; document text enters context when the agent requests a page (up to 2048 UTF-8 bytes). Retrieved pages remain in that analysis's tool history, but are not retained in subsequent questions. Both native and web builds use bundled text, with no embedding model or runtime web fetch. To bundle another specification, add a Markdown file under `crates/agent/knowledge/`, register its ID, title, and `include_str!` in [knowledge.rs](crates/agent/src/knowledge.rs), and rebuild.
+
+To ask about an area, **Ctrl+drag** on the timeline and click **Copy for agent**, then paste into your question. The copied text includes inclusive cycle and operation ID bounds, zero-based unfiltered row bounds, and flushed-operation visibility. Operation IDs may have gaps; the area describes rows within a cycle interval, not necessarily overlapping stages for every operation. The selection stays in its tab for the session and clears when row visibility changes. Selecting or copying does not send a model request.
 
 Each tab permits one run, with two runs globally. A run is limited to 120 seconds, 16 model turns, and 32 tool calls. Result pages default to 20 items and are capped at 64, with tool output capped at 64 KiB and truncation indicated. Conversations retain at most 32 messages and 64 KiB; final replies are capped at 32 KiB. Closing a trace, changing configuration, cancelling, or finishing releases run-owned indexes.
 

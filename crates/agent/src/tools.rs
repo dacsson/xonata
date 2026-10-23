@@ -38,6 +38,7 @@ pub(crate) fn build(
 ) -> Result<Vec<DynamicTool>, String> {
     let calls = Arc::new(AtomicU32::new(0));
     let sequence = Arc::new(AtomicU32::new(0));
+    let knowledge_description = crate::knowledge::description();
     let definitions = [
         (
             "trace_info",
@@ -68,6 +69,11 @@ pub(crate) fn build(
             "query_phases",
             "Start a phase query with text, or omit text to page current results. Optional descending sorts by signed elapsed cycles. Read phase_help first.",
             json!({"text":{"type":"string"},"start":{"type":"string"},"count":{"type":"integer"},"descending":{"type":"boolean"}}),
+        ),
+        (
+            "read_specification",
+            knowledge_description.as_str(),
+            json!({"id":{"type":"string"},"start":{"type":"string"}}),
         ),
     ];
     definitions
@@ -112,6 +118,10 @@ pub(crate) fn build(
                                 }
                                 "peek_rows" => call(AnalysisAction::Rows { start, count }).await?,
                                 "phase_help" => json!({"syntax":HELP}),
+                                "read_specification" => crate::knowledge::read(
+                                    args.id.as_deref().ok_or("id is required")?,
+                                    start,
+                                )?,
                                 "search_trace" | "query_phases" => {
                                     let phases = name == "query_phases";
                                     if let Some(text) = args.text {
