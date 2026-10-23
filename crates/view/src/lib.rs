@@ -102,8 +102,8 @@ impl Viewport {
     fn set_scale(&mut self, width: f32, height: f32, x: f32, y: f32) {
         let old_x = self.cycle_width;
         let old_y = self.row_height;
-        self.cycle_width = width.clamp(0.02, 320.0);
-        self.row_height = height.clamp(0.5, 160.0);
+        self.cycle_width = width.clamp(0.000002, 320.0);
+        self.row_height = height.clamp(0.5, 1024.0);
         self.shift_cycles(x as f64 / old_x as f64 - x as f64 / self.cycle_width as f64);
         self.row =
             (self.row + y as f64 / old_y as f64 - y as f64 / self.row_height as f64).max(0.0);
@@ -135,6 +135,46 @@ impl Marker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn horizontal_zoom_should_compress_beyond_the_old_minimum_with_exact_large_cycles() {
+        let origin = u64::MAX - 1_000_000_000;
+        let mut view = Viewport {
+            cycle: origin,
+            row: 10.0,
+            ..Default::default()
+        };
+        let anchor = origin + 1_000_000;
+        view.zoom_axes(0.000002 / DEFAULT_CYCLE_WIDTH, 1.0, 0.0, 0.0);
+        assert_eq!(view.cycle_width, 0.000002);
+        assert!((view.x(origin + 500_000_000) - 1000.0).abs() < 0.001);
+        assert_eq!(view.cycle_at(view.x(anchor)), anchor);
+        view.zoom_axes(2.0, 1.0, 2.0, 0.0);
+        assert_eq!(view.cycle_at(2.0), anchor);
+        assert!((view.x(anchor) - 2.0).abs() < 0.001);
+        view.zoom_axes(0.001, 1.0, 2.0, 0.0);
+        assert_eq!(view.cycle_width, 0.000002);
+        assert_eq!(view.cycle_at(2.0), anchor);
+        assert_eq!((view.row, view.row_height), (10.0, DEFAULT_ROW_HEIGHT));
+    }
+
+    #[test]
+    fn vertical_zoom_should_exceed_the_old_cap_and_preserve_its_anchor() {
+        let mut view = Viewport {
+            cycle: u64::MAX - 100,
+            row: 30.0,
+            ..Default::default()
+        };
+        let cycle = (view.cycle, view.cycle_fraction, view.cycle_width);
+        let row = view.row + 200.0 / view.row_height as f64;
+        view.zoom_axes(1.0, 10.0, 220.0, 200.0);
+        assert_eq!(view.row_height, 440.0);
+        assert!((view.row + 200.0 / view.row_height as f64 - row).abs() < 1e-10);
+        view.zoom_axes(1.0, 100.0, 220.0, 200.0);
+        assert_eq!(view.row_height, 1024.0);
+        assert!((view.row + 200.0 / view.row_height as f64 - row).abs() < 1e-10);
+        assert_eq!((view.cycle, view.cycle_fraction, view.cycle_width), cycle);
+    }
+
     #[test]
     fn independent_zoom_should_preserve_the_other_axis_and_anchor() {
         let mut view = Viewport {

@@ -53,6 +53,7 @@ python3 -m http.server 8000 --directory target/pages
 | Horizontal zoom in / out | **Ctrl+Right / Ctrl+Left** |
 | Vertical zoom in / out | **Ctrl+Up / Ctrl+Down** |
 | Zoom both axes / pan / scroll | **Ctrl+wheel** or pinch / drag / wheel |
+| Pan with keyboard | **Shift+arrows** (192 pixels per step; hold to repeat) |
 | Place / move / remove marker | **Shift+click** / drag its dot / hover its dot and press **Delete** |
 | Copy an area for an agent question | **Ctrl+drag** on the timeline, then **Copy for agent**; **Esc** or **Clear** removes the selection |
 | Place / edit comment | **C**, then click the trace / click its bubble |
@@ -63,7 +64,7 @@ python3 -m http.server 8000 --directory target/pages
 
 The overview fits all pipeline rows and cycles into a full-height strip. Click or drag to jump to a row’s first phase; the white indicator tracks the current viewport. Drag its left edge to resize, use **> / <** to expand or compact it, or **×** to hide it.
 
-Shortcuts for letters and zoom are inactive while typing. **X/Y** percentages reset each zoom axis. Click a phase or disassembly row to inspect metadata. Drag the disassembly edge to resize it; **> / <** expands or compacts it. **Inspector → Markers** provides editing, **×** removal, and **Clear markers**. Markers and comments last for the session and belong to their trace tab. Comments accept pasted text and follow the cycle/row grid during pan and zoom. Press **Esc** to cancel comment placement. **View** contains split view, the flushed-operation filter, and jumps by operation or retired ID.
+Shortcuts for letters, keyboard panning, and zoom are inactive while typing. **X/Y** percentages reset each zoom axis. Click a phase or disassembly row to inspect metadata. Drag the disassembly edge to resize it; **> / <** expands or compacts it. **Inspector → Markers** provides editing, **×** removal, and **Clear markers**. Markers and comments last for the session and belong to their trace tab. Comments accept pasted text and follow the cycle/row grid during pan and zoom. Press **Esc** to cancel comment placement. **View** contains split view, the flushed-operation filter, and jumps by operation or retired ID.
 
 ## Phase and interval filters
 

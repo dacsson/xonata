@@ -701,6 +701,19 @@ impl Viewer {
             canvas_shortcuts && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::ArrowUp));
         let zoom_y_out =
             canvas_shortcuts && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::ArrowDown));
+        let mut pan = Vec2::ZERO;
+        if canvas_shortcuts {
+            for (key, delta) in [
+                (Key::ArrowLeft, Vec2::new(192.0, 0.0)),
+                (Key::ArrowRight, Vec2::new(-192.0, 0.0)),
+                (Key::ArrowUp, Vec2::new(0.0, 192.0)),
+                (Key::ArrowDown, Vec2::new(0.0, -192.0)),
+            ] {
+                if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, key)) {
+                    pan += delta;
+                }
+            }
+        }
         let overview =
             canvas_shortcuts && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::M));
         let open = ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O));
@@ -724,6 +737,11 @@ impl Viewer {
                 }
                 if cancel_comment {
                     tab.comments.placing = false;
+                }
+                if pan != Vec2::ZERO {
+                    tab.view.pan(pan.x, pan.y);
+                    tab.auto_center = false;
+                    tab.last_view = None;
                 }
                 if zoom_x_in || zoom_x_out || zoom_y_in || zoom_y_out {
                     let anchor = tab.zoom_anchor();
@@ -1303,7 +1321,7 @@ impl eframe::App for Viewer {
                                         ("Draw filter results", "Filters → Draw"),
                                         ("Next / previous match", "n / p"),
                                         ("Show this guide", "?"),
-                                        ("Pan trace", "Drag"),
+                                        ("Pan trace", "Drag / Shift+arrows (192 px per step)"),
                                         ("Scroll trace", "Wheel"),
                                         ("Zoom both axes", "Ctrl+wheel / Pinch"),
                                         ("Horizontal zoom in / out", "Ctrl+Right / Ctrl+Left"),
@@ -2991,6 +3009,99 @@ mod tests {
                     DEFAULT_ROW_HEIGHT * y_factor
                 )
             );
+        }
+    }
+
+    #[test]
+    fn shift_arrows_should_pan_repeat_and_respect_canvas_shortcut_guards() {
+        for (key, delta) in [
+            (Key::ArrowLeft, Vec2::new(192.0, 0.0)),
+            (Key::ArrowRight, Vec2::new(-192.0, 0.0)),
+            (Key::ArrowUp, Vec2::new(0.0, 192.0)),
+            (Key::ArrowDown, Vec2::new(0.0, -192.0)),
+        ] {
+            for blocked in ["", "help", "error", "search", "comment", "text"] {
+                let (ctx, mut tab) = context_and_tab();
+                tab.view.cycle = u64::MAX - 100;
+                tab.view.row = 10.0;
+                tab.search_open = blocked == "search";
+                tab.chat.open = blocked == "text";
+                tab.chat.focus_input = blocked == "text";
+                if blocked == "comment" {
+                    tab.comments.begin(Marker { cycle: 100, row: 0 });
+                }
+                let mut viewer = Viewer {
+                    transport: Box::new(TestTransport),
+                    tabs: vec![tab],
+                    active: Some(1),
+                    split: None,
+                    error: (blocked == "error").then(|| "Test error".into()),
+                    jump_text: String::new(),
+                    jump_retired: false,
+                    show_help: blocked == "help",
+                    prefs: Preferences::default(),
+                    chats: crate::chat::Chats::default(),
+                };
+                if blocked == "text" {
+                    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                        viewer.chats.show(
+                            ctx,
+                            1,
+                            true,
+                            &mut viewer.tabs[0].chat,
+                            Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0)),
+                            &mut *viewer.transport,
+                        );
+                    });
+                    assert!(ctx.wants_keyboard_input());
+                }
+                for repeat in [false, true] {
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            modifiers: Modifiers::SHIFT,
+                            events: vec![egui::Event::Key {
+                                key,
+                                physical_key: None,
+                                pressed: true,
+                                repeat,
+                                modifiers: Modifiers::SHIFT,
+                            }],
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            viewer.shortcuts(ctx);
+                            if blocked == "text" {
+                                viewer.chats.show(
+                                    ctx,
+                                    1,
+                                    true,
+                                    &mut viewer.tabs[0].chat,
+                                    Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0)),
+                                    &mut *viewer.transport,
+                                );
+                            }
+                        },
+                    );
+                    let expected = if blocked.is_empty() {
+                        delta * if repeat { 2.0 } else { 1.0 }
+                    } else {
+                        Vec2::ZERO
+                    };
+                    let view = &viewer.tabs[0].view;
+                    assert!(
+                        (view.x(u64::MAX - 100) - expected.x).abs() < 0.001,
+                        "{key:?}, {blocked}"
+                    );
+                    assert!(
+                        (view.y(10) - expected.y).abs() < 0.001,
+                        "{key:?}, {blocked}"
+                    );
+                    assert_eq!(
+                        (view.cycle_width, view.row_height),
+                        (DEFAULT_CYCLE_WIDTH, DEFAULT_ROW_HEIGHT)
+                    );
+                }
+            }
         }
     }
 
