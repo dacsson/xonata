@@ -410,6 +410,14 @@ impl Chats {
                 if chat.focus_input {
                     if self.available() {
                         input.request_focus();
+                        if let Some(mut state) = egui::TextEdit::load_state(ctx, input.id) {
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(chat.input.chars().count()),
+                                )));
+                            state.store(ctx, input.id);
+                        }
                     }
                     chat.focus_input = false;
                 }

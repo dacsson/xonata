@@ -55,7 +55,7 @@ python3 -m http.server 8000 --directory target/pages
 | Zoom both axes / pan / scroll | **Ctrl+wheel** or pinch / drag / wheel |
 | Pan with keyboard | **Shift+arrows** (192 pixels per step; hold to repeat) |
 | Place / move / remove marker | **Shift+click** / drag its dot / hover its dot and press **Delete** |
-| Copy an area for an agent question | **Ctrl+drag** on the timeline, then **Copy for agent**; **Esc** or **Clear** removes the selection |
+| Copy an area for an agent question | **Ctrl+drag** on the timeline, then **Copy for agent** or **Send to agent chat**; **Esc** or **Clear** removes the selection |
 | Place / edit comment | **C**, then click the trace / click its bubble |
 | Save / newline / cancel comment | **Enter / Shift+Enter / Esc** |
 | Remove comment | Hover its bubble and press **Delete**, or use **Delete** in its editor |
@@ -101,6 +101,8 @@ Browser embeds can observe `xonata:filter_suggestions`, `xonata:filter_progress`
 Development and verification instructions are in [AGENTS.md](AGENTS.md). Bundled Liberation Mono fonts include their [license](crates/app/assets/fonts/LICENSE).
 
 ## Trace analysis agent
+
+**Send to agent chat** in the selected-area panel opens the chat and appends a newline, the area context, and another newline to the existing draft without submitting it.
 
 **Agent** opens a session-only conversation for the active trace after loading finishes. Enter or **Send** submits a question; **Shift+Enter** inserts a newline in the four-line input; **Cancel** stops the current analysis. Conversations retain follow-up context independently per tab. Closing the panel leaves its run active; closing its trace cancels the run. Text editing keeps canvas shortcuts inactive.
 

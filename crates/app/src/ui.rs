@@ -1332,6 +1332,7 @@ impl eframe::App for Viewer {
                                         ("Remove comment", "Hover bubble + Delete"),
                                         ("Place marker", "Shift+click"),
                                         ("Copy area for agent", "Ctrl+drag, then Copy for agent"),
+                                        ("Append area to chat", "Select area → Send to agent chat"),
                                         ("Clear agent area", "Esc / Clear"),
                                         ("Move marker", "Drag marker"),
                                         ("Remove marker", "Hover marker + Delete"),
@@ -2189,7 +2190,7 @@ fn draw_pipeline(
         );
     }
     bubbles.paint(&painter, label_clip);
-    tab.agent_area.show(
+    if let Some(context) = tab.agent_area.show(
         ui,
         &crate::agent_area::AreaInput {
             view: &tab.view,
@@ -2199,7 +2200,13 @@ fn draw_pipeline(
             hide_flushed: tab.hide_flushed,
             blocked: comments_block || comment_placement,
         },
-    );
+    ) {
+        tab.chat.input.push('\n');
+        tab.chat.input.push_str(&context);
+        tab.chat.input.push('\n');
+        tab.chat.open = true;
+        tab.chat.focus_input = true;
+    }
     if tab.comments.placing {
         painter.with_clip_rect(label_clip).text(
             label_clip.center_bottom() - Vec2::new(0.0, 16.0),

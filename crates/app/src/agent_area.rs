@@ -1,4 +1,4 @@
-//! A single session-only timeline area copied as context for an agent question.
+//! A single session-only timeline area used as context for an agent question.
 use crate::ui::ACCENT;
 use egui::{self, Pos2, Rect, Response, Stroke, StrokeKind, Ui};
 use xonata_core::{AreaBounds, Request, TraceInfo};
@@ -127,10 +127,8 @@ impl AgentArea {
         None
     }
 
-    pub fn show(&mut self, ui: &Ui, input: &AreaInput<'_>) {
-        let Some(selection) = &mut self.selection else {
-            return;
-        };
+    pub fn show(&mut self, ui: &Ui, input: &AreaInput<'_>) -> Option<String> {
+        let selection = self.selection.as_mut()?;
         let rect = Rect::from_min_max(
             Pos2::new(
                 input.rect.left() + input.view.x(selection.first.cycle),
@@ -150,9 +148,10 @@ impl AgentArea {
             painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, ACCENT), StrokeKind::Inside);
         }
         if self.anchor.is_some() {
-            return;
+            return None;
         }
         let mut clear = false;
+        let mut chat_context = None;
         egui::Area::new(egui::Id::new((input.info.id, "agent-area")))
             .order(egui::Order::Middle)
             .pivot(egui::Align2::LEFT_BOTTOM)
@@ -170,6 +169,15 @@ impl AgentArea {
                         {
                             ui.ctx().copy_text(selection.context(&input.info.name));
                             selection.copied = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                selection.resolved.is_some(),
+                                egui::Button::new("Send to agent chat"),
+                            )
+                            .clicked()
+                        {
+                            chat_context = Some(selection.context(&input.info.name));
                         }
                         clear = ui.button("Clear").clicked();
                         if selection.copied {
@@ -197,6 +205,7 @@ impl AgentArea {
         if clear {
             self.clear();
         }
+        chat_context
     }
 }
 
@@ -321,7 +330,7 @@ mod tests {
                             blocked: false,
                         };
                         area.interact(ui, &response, &input);
-                        area.show(ui, &input);
+                        let _ = area.show(ui, &input);
                     });
             },
         )
