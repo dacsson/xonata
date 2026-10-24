@@ -13,6 +13,7 @@ A Rust viewer for Kanata v4 pipeline traces. Runs natively or in a browser throu
 - **Measure and annotate:** draggable grid markers show cycle and row distances, your comment bubbles point to specific trace locations.
 - **Keep the trace central:** resizable disassembly and inspector overlays, aligned rows, metadata tooltips, and a minimal monospace interface.
 - **Handle large logs:** worker-based parsing, paged temporary storage, and a bounded decoded-page cache.
+- **Use LLM agent to help you analyze the trace:** configure litellm connection and ask agent anything, he can use bundled agent tools for kanata analysis
 
 ## Run
 
