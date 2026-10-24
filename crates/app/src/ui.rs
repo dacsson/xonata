@@ -1057,12 +1057,20 @@ impl eframe::App for Viewer {
             for tab in &mut self.tabs {
                 tab.chat.running = false;
                 tab.chat.status = "Agent configuration updated".into();
+                tab.chat.activity.settle(ctx.input(|input| input.time));
             }
         }
         for update in self.chats.poll_events(&mut *self.transport) {
             if let Some(tab) = self.tab_mut(update.trace) {
                 tab.chat.running = update.running;
                 tab.chat.status = update.status;
+                let now = ctx.input(|input| input.time);
+                for event in update.activity {
+                    tab.chat.activity.push(event, now);
+                }
+                if !update.running {
+                    tab.chat.activity.settle(now);
+                }
                 if let Some(text) = update.reply {
                     tab.chat.messages.push(xonata_agent::Message {
                         role: xonata_agent::Role::Assistant,
@@ -1144,6 +1152,7 @@ impl eframe::App for Viewer {
                 for tab in &mut self.tabs {
                     tab.chat.running = false;
                     tab.chat.status = "Agent configuration updated".into();
+                    tab.chat.activity.settle(ctx.input(|input| input.time));
                 }
             }
         }

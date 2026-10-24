@@ -1,6 +1,9 @@
 //! Bounded, provider-backed trace analysis. Hosts own scheduling and trace data.
+mod activity;
 mod knowledge;
 mod tools;
+
+pub use activity::{ActivityEvent, MAX_PREVIEW_BYTES};
 
 use futures::channel::{mpsc, oneshot};
 use futures::{
@@ -152,7 +155,7 @@ pub async fn run(
     config: AgentConfig,
     client: TraceClient,
     history: Vec<Message>,
-    activity: mpsc::Sender<String>,
+    activity: mpsc::Sender<ActivityEvent>,
     cancellation: AbortRegistration,
 ) -> Result<String, AgentError> {
     config.validate().map_err(AgentError::Failed)?;
@@ -176,7 +179,8 @@ pub async fn run(
                 .chat(config.model),
         )
         .preamble(PREAMBLE)
-        .dynamic_tools(tools::build(client, activity).map_err(AgentError::Failed)?)
+        .dynamic_tools(tools::build(client).map_err(AgentError::Failed)?)
+        .add_hook(activity::ActivityHook(activity))
         .default_max_turns(16)
         .max_tokens(4096)
         .build();

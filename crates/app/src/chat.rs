@@ -7,7 +7,7 @@ use futures::{
 };
 use std::collections::BTreeMap;
 pub use xonata_agent::AgentConfig;
-use xonata_agent::{Message, Role, TraceClient};
+use xonata_agent::{ActivityEvent, Message, Role, TraceClient};
 use xonata_core::{AnalysisAction, AnalysisRequest};
 
 /// Reply channel owned by a worker transport until its bounded request completes.
@@ -21,12 +21,13 @@ pub(crate) struct Chat {
     pub messages: Vec<Message>,
     pub running: bool,
     pub status: String,
+    pub activity: crate::chat_activity::Activity,
 }
 
 struct Active {
     run: u32,
     cancel: AbortHandle,
-    activity: mpsc::Receiver<String>,
+    activity: mpsc::Receiver<ActivityEvent>,
 }
 
 struct Finished {
@@ -40,6 +41,7 @@ pub(crate) struct ChatUpdate {
     pub running: bool,
     pub status: String,
     pub reply: Option<String>,
+    pub activity: Vec<ActivityEvent>,
 }
 
 pub(crate) struct Chats {
@@ -209,16 +211,14 @@ impl Chats {
         }
         let mut events = Vec::new();
         for (&trace, active) in &mut self.active {
-            let mut latest = None;
-            while let Ok(text) = active.activity.try_recv() {
-                latest = Some(text);
-            }
-            if let Some(text) = latest {
+            let activity = Self::drain_activity(active);
+            if !activity.is_empty() {
                 events.push(ChatUpdate {
                     trace,
                     running: true,
-                    status: format!("Inspecting {text}…"),
+                    status: String::new(),
                     reply: None,
+                    activity,
                 });
             }
         }
@@ -230,22 +230,36 @@ impl Chats {
             {
                 continue;
             }
-            self.active.remove(&done.trace);
+            let activity = self
+                .active
+                .remove(&done.trace)
+                .map(|mut active| Self::drain_activity(&mut active))
+                .unwrap_or_default();
             Self::release(done.trace, done.run, transport);
             events.push(match done.result {
                 Ok(text) => ChatUpdate {
                     trace: done.trace,
                     running: false,
-                    status: String::new(),
+                    status: "Analysis complete".into(),
                     reply: Some(text),
+                    activity,
                 },
                 Err(error) => ChatUpdate {
                     trace: done.trace,
                     running: false,
                     status: error.to_string(),
                     reply: None,
+                    activity,
                 },
             });
+        }
+        events
+    }
+
+    fn drain_activity(active: &mut Active) -> Vec<ActivityEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = active.activity.try_recv() {
+            events.push(event);
         }
         events
     }
@@ -312,6 +326,7 @@ impl Chats {
             },
         );
         chat.input.clear();
+        chat.activity.reset();
         chat.running = true;
         chat.status = "Analyzing…".into();
         Ok(())
@@ -350,9 +365,15 @@ impl Chats {
                     ui.label("Wait for trace loading to finish.");
                 }
                 let input_height = ui.text_style_height(&egui::TextStyle::Body) * 4.0 + 8.0;
+                let history_height = (ui.available_height() - input_height - 65.0).max(80.0);
+                let details_height = if chat.activity.expanded {
+                    (history_height * 0.6).min(crate::chat_activity::DETAILS_HEIGHT)
+                } else {
+                    0.0
+                };
                 egui::ScrollArea::vertical()
                     .id_salt((trace, "agent-history"))
-                    .max_height((ui.available_height() - input_height - 65.0).max(80.0))
+                    .max_height(history_height - details_height)
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -368,7 +389,8 @@ impl Chats {
                             ui.add_space(8.0);
                         }
                     });
-                ui.label(&chat.status);
+                chat.activity
+                    .show(ui, trace, &chat.status, chat.running, details_height);
                 let input = ui
                     .scope(|ui| {
                         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
@@ -445,6 +467,7 @@ impl Chats {
                         self.cancel(trace, transport);
                         chat.running = false;
                         chat.status = "Analysis cancelled".into();
+                        chat.activity.settle(ui.input(|input| input.time));
                     }
                 });
             });
@@ -490,6 +513,52 @@ mod tests {
             cancel,
             activity,
         }
+    }
+
+    #[test]
+    fn lifecycle_events_should_survive_one_poll_and_reject_cancelled_runs() {
+        let mut chats = Chats::default();
+        let mut host = Host::default();
+        let mut run = active(10);
+        let (mut sender, receiver) = mpsc::channel(8);
+        run.activity = receiver;
+        chats.active.insert(1, run);
+        sender
+            .try_send(ActivityEvent::Started {
+                id: 1,
+                turn: 1,
+                tool: None,
+            })
+            .unwrap();
+        sender
+            .try_send(ActivityEvent::Finished {
+                id: 1,
+                failed: false,
+                output: None,
+            })
+            .unwrap();
+        let live = chats.poll_events(&mut host);
+        assert_eq!(live.len(), 1);
+        assert!(live[0].running);
+        assert_eq!(live[0].activity.len(), 2);
+        sender
+            .try_send(ActivityEvent::Started {
+                id: 2,
+                turn: 2,
+                tool: None,
+            })
+            .unwrap();
+        chats.cancel(1, &mut host);
+        chats.active.insert(1, active(11));
+        chats
+            .finish
+            .unbounded_send(Finished {
+                trace: 1,
+                run: 10,
+                result: Ok("old answer".into()),
+            })
+            .unwrap();
+        assert!(chats.poll_events(&mut host).is_empty());
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use crate::{MAX_TOOL_BYTES, TraceClient, delay};
-use futures::channel::mpsc;
 use rig::message::ToolName;
 use rig::tool::{DynamicTool, ToolExecutionError, ToolOutput};
 use serde::Deserialize;
@@ -32,10 +31,7 @@ fn decimal(value: Option<String>) -> Result<u64, String> {
 }
 const HELP: &str = "Phase syntax: phase=E & instr=vfirst & meta_contains=RQU* & thread=0 & duration>=3. Intervals: from=E & instr=vfirst -> to=E & instr=vmsne; gap>=0. Add phase_pos=START or phase_pos=END to an endpoint (End must be known). Each source pairs with the next later matching row in the same thread, then signed gap constraints apply without substituting a later target. Optional exclusion: ; exclude=\"phase=X & instr=barrier\"; exclude_scope=rows (strictly intervening rows) or all (any row/thread), boundaries strictly inside the paired interval. Field contains matching is case-insensitive with wildcards. Inspect trace_info symbols and operation stages first; phase names vary between traces. Results use exact decimal strings and retain stable original indexes under elapsed sorting.";
 
-pub(crate) fn build(
-    client: TraceClient,
-    activity: mpsc::Sender<String>,
-) -> Result<Vec<DynamicTool>, String> {
+pub(crate) fn build(client: TraceClient) -> Result<Vec<DynamicTool>, String> {
     let calls = Arc::new(AtomicU32::new(0));
     let sequence = Arc::new(AtomicU32::new(0));
     let knowledge_description = crate::knowledge::description();
@@ -82,7 +78,6 @@ pub(crate) fn build(
             let client = client.clone();
             let calls = calls.clone();
             let sequence = sequence.clone();
-            let activity = activity.clone();
             let tool = DynamicTool::new(
                 ToolName::new(name).map_err(|e| e.to_string())?,
                 description,
@@ -91,13 +86,11 @@ pub(crate) fn build(
                     let client = client.clone();
                     let calls = calls.clone();
                     let sequence = sequence.clone();
-                    let mut activity = activity.clone();
                     Box::pin(async move {
                         let result: Result<Value, String> = async {
                             if calls.fetch_add(1, Ordering::Relaxed) >= 32 {
                                 return Err("Tool call budget exhausted (32)".into());
                             }
-                            let _ = activity.try_send(name.to_owned());
                             let args: Args = serde_json::from_value(args)
                                 .map_err(|e| format!("Invalid tool arguments: {e}"))?;
                             if args.text.as_ref().is_some_and(|s| s.len() > 16 * 1024) {
@@ -254,8 +247,7 @@ mod tests {
     fn invalid_arguments_and_tool_budgets_do_not_reach_the_worker() {
         futures::executor::block_on(async {
             let (sender, mut requests) = crate::trace_channel();
-            let (activity, _) = mpsc::channel(8);
-            let tools = build(TraceClient::new(sender, 1, 1), activity).unwrap();
+            let tools = build(TraceClient::new(sender, 1, 1)).unwrap();
             assert!(tools[1].run(json!({"id":"-1"})).await.is_err());
             assert!(tools[2].run(json!({"unknown":1})).await.is_err());
             for _ in 0..30 {

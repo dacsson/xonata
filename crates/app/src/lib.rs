@@ -5,6 +5,7 @@ pub mod ui;
 
 mod agent_area;
 pub mod chat;
+mod chat_activity;
 mod comments;
 mod filter_builder;
 mod filters;

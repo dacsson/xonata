@@ -124,6 +124,13 @@ try {
   const result=JSON.parse(typeof resultText==='string'?resultText:resultText.map(c=>c.text||'').join(''));
   assert.equal(result.data.status.filter_total,'2');assert.equal(result.data.page.hits[0].elapsed,'4');
   assert.equal(result.data.page.hits[0].source.start,'9007199254740995');
+  // Keep the compact status above the input, then inspect the latest run's tool details.
+  await click(65,196); // Collapse connection settings to leave more room for activity.
+  await click(69,520);await sleep(200);
+  await click(220,420);await sleep(200); // Expand the first tool in the activity list.
+  const activityScreenshot=await call('Page.captureScreenshot',{format:'png'});
+  await writeFile('target/browser-agent-activity.png',Buffer.from(activityScreenshot.data,'base64'));
+  await click(69,376);await sleep(100);
   await openChat();await openChat();await submit('follow up');
   await wait(()=>requests.length>=5,'follow-up');await sleep(400);
   assert(requests[4].messages.some(m=>m.role==='assistant'&&JSON.stringify(m.content).includes('Operation 1 takes 4 cycles.')));

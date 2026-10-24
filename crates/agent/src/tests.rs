@@ -88,9 +88,16 @@ fn provider(
 }
 
 async fn turn(config: AgentConfig, history: Vec<Message>) -> Result<String, AgentError> {
+    observed_turn(config, history).await.0
+}
+
+async fn observed_turn(
+    config: AgentConfig,
+    history: Vec<Message>,
+) -> (Result<String, AgentError>, Vec<ActivityEvent>) {
     let (sender, mut requests) = trace_channel();
     let client = TraceClient::new(sender, 7, 42);
-    let (activity, _) = mpsc::channel(8);
+    let (activity, activity_rx) = mpsc::channel(8);
     let (_cancel, registration) = futures::future::AbortHandle::new_pair();
     let task = run(config, client, history, activity, registration);
     let host = async {
@@ -103,7 +110,8 @@ async fn turn(config: AgentConfig, history: Vec<Message>) -> Result<String, Agen
                 .send(Ok(json!({"count":"9007199254740993","complete":true})));
         }
     };
-    futures::join!(task, host).0
+    let (result, (), events) = futures::join!(task, host, activity_rx.collect());
+    (result, events)
 }
 
 #[test]
@@ -132,15 +140,26 @@ fn compatible_model_executes_tools_and_receives_role_aware_followup_context() {
         ),
     ]);
     runtime().block_on(async {
-        let first = turn(
+        let (first, activity) = observed_turn(
             config.clone(),
             vec![Message {
                 role: Role::User,
                 text: "Count instructions".into(),
             }],
         )
-        .await
-        .unwrap();
+        .await;
+        let first = first.unwrap();
+        assert_eq!(activity.len(), 6);
+        assert!(matches!(&activity[0], ActivityEvent::Started { turn: 1, tool: None, .. }));
+        assert!(matches!(&activity[2], ActivityEvent::Started { turn: 1, tool: Some((name, args)), .. }
+            if name == "trace_info" && args == "{}"));
+        assert!(matches!(&activity[3], ActivityEvent::Finished { failed: false, output: Some(text), .. }
+            if text.contains("9007199254740993")));
+        assert!(matches!(&activity[4], ActivityEvent::Started { turn: 2, tool: None, .. }));
+        for pair in activity.as_chunks::<2>().0 {
+            assert!(matches!((&pair[0], &pair[1]),
+                (ActivityEvent::Started { id: start, .. }, ActivityEvent::Finished { id: end, failed: false, .. }) if start == end));
+        }
         let second = turn(
             config,
             vec![
@@ -256,21 +275,62 @@ fn specifications_are_read_on_demand_without_retaining_pages_in_followups() {
 }
 
 #[test]
+fn failed_tools_should_report_arguments_and_the_returned_error() {
+    let (config, _, server) = provider(vec![
+        (
+            200,
+            answer(
+                json!({"role":"assistant","content":null,"tool_calls":[{
+                    "id":"bad-spec","type":"function","function":{
+                        "name":"read_specification","arguments":"{\"id\":\"unknown\"}"
+                    }
+                }]}),
+                "tool_calls",
+            ),
+        ),
+        (
+            200,
+            answer(
+                json!({"role":"assistant","content":"The specification was not found."}),
+                "stop",
+            ),
+        ),
+    ]);
+    let (result, activity) = runtime().block_on(observed_turn(
+        config,
+        vec![Message {
+            role: Role::User,
+            text: "Read a specification".into(),
+        }],
+    ));
+    assert!(result.is_ok());
+    assert!(activity.iter().any(|event| matches!(event,
+        ActivityEvent::Started { tool: Some((name, args)), .. }
+            if name == "read_specification" && args.contains("unknown"))));
+    assert!(activity.iter().any(|event| matches!(event,
+        ActivityEvent::Finished { failed: true, output: Some(output), .. }
+            if output.contains("Unknown specification ID"))));
+    server.join().unwrap();
+}
+
+#[test]
 fn provider_errors_are_terminal() {
     let (config, _, server) = provider(vec![(
         401,
         json!({"error":{"message":"Invalid credentials","type":"authentication_error"}}),
     )]);
-    let error = runtime()
-        .block_on(turn(
-            config,
-            vec![Message {
-                role: Role::User,
-                text: "Count".into(),
-            }],
-        ))
-        .unwrap_err();
-    assert!(matches!(error, AgentError::Failed(_)));
+    let (result, activity) = runtime().block_on(observed_turn(
+        config,
+        vec![Message {
+            role: Role::User,
+            text: "Count".into(),
+        }],
+    ));
+    assert!(matches!(result, Err(AgentError::Failed(_))));
+    assert!(matches!(
+        activity.last(),
+        Some(ActivityEvent::Finished { failed: true, .. })
+    ));
     server.join().unwrap();
 }
 
