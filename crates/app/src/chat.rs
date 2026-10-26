@@ -1,0 +1,685 @@
+//! Shared per-tab conversation UI and bounded analysis lifecycle.
+use crate::ui::Transport;
+use egui::{self, Rect};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::AbortHandle,
+};
+use std::collections::BTreeMap;
+pub use xonata_agent::AgentConfig;
+use xonata_agent::{ActivityEvent, Message, Role, TraceClient};
+use xonata_core::{AnalysisAction, AnalysisRequest};
+
+/// Reply channel owned by a worker transport until its bounded request completes.
+pub type AnalysisReply = oneshot::Sender<Result<serde_json::Value, String>>;
+
+#[derive(Default)]
+pub(crate) struct Chat {
+    pub open: bool,
+    pub input: String,
+    pub focus_input: bool,
+    pub messages: Vec<Message>,
+    pub running: bool,
+    pub status: String,
+    pub activity: crate::chat_activity::Activity,
+}
+
+struct Active {
+    run: u32,
+    cancel: AbortHandle,
+    activity: mpsc::Receiver<ActivityEvent>,
+}
+
+struct Finished {
+    trace: u32,
+    run: u32,
+    result: Result<String, xonata_agent::AgentError>,
+}
+
+pub(crate) struct ChatUpdate {
+    pub trace: u32,
+    pub running: bool,
+    pub status: String,
+    pub reply: Option<String>,
+    pub activity: Vec<ActivityEvent>,
+}
+
+pub(crate) struct Chats {
+    config: Option<AgentConfig>,
+    draft: AgentConfig,
+    connection_error: Option<String>,
+    next_run: u32,
+    active: BTreeMap<u32, Active>,
+    sender: mpsc::Sender<xonata_agent::PendingRequest>,
+    requests: xonata_agent::Requests,
+    finished: mpsc::UnboundedReceiver<Finished>,
+    finish: mpsc::UnboundedSender<Finished>,
+    #[cfg(not(target_arch = "wasm32"))]
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Default for Chats {
+    fn default() -> Self {
+        let (sender, requests) = xonata_agent::trace_channel();
+        let (finish, finished) = mpsc::unbounded();
+        #[cfg(not(target_arch = "wasm32"))]
+        let config = AgentConfig::from_env();
+        #[cfg(target_arch = "wasm32")]
+        let config = None;
+        Self {
+            draft: config.clone().unwrap_or(AgentConfig {
+                base_url: "http://localhost:4000/v1".into(),
+                api_key: String::new(),
+                model: "rig-chat".into(),
+            }),
+            config,
+            connection_error: None,
+            next_run: 0,
+            active: BTreeMap::new(),
+            sender,
+            requests,
+            finished,
+            finish,
+            #[cfg(not(target_arch = "wasm32"))]
+            runtime: None,
+        }
+    }
+}
+
+impl Drop for Chats {
+    fn drop(&mut self) {
+        for active in self.active.values() {
+            active.cancel.abort();
+        }
+    }
+}
+
+impl Chats {
+    pub fn available(&self) -> bool {
+        self.config.is_some()
+    }
+
+    pub fn configure(&mut self, config: Option<AgentConfig>, transport: &mut dyn Transport) {
+        let traces: Vec<_> = self.active.keys().copied().collect();
+        for trace in traces {
+            self.cancel(trace, transport);
+        }
+        self.draft = config.clone().unwrap_or(AgentConfig {
+            base_url: "http://localhost:4000/v1".into(),
+            api_key: String::new(),
+            model: "rig-chat".into(),
+        });
+        self.connection_error = None;
+        self.config = config;
+    }
+
+    fn apply_connection(&mut self, transport: &mut dyn Transport) -> Result<(), String> {
+        let config = AgentConfig {
+            base_url: self.draft.base_url.trim().to_owned(),
+            api_key: self.draft.api_key.trim().to_owned(),
+            model: self.draft.model.trim().to_owned(),
+        };
+        config.validate()?;
+        self.configure(Some(config), transport);
+        Ok(())
+    }
+
+    fn connection_settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        transport: &mut dyn Transport,
+        focus: bool,
+    ) -> bool {
+        let mut changed = false;
+        egui::CollapsingHeader::new("LiteLLM connection")
+            .default_open(!self.available())
+            .show(ui, |ui| {
+                ui.label("Shared across tabs · session only");
+                ui.label("Base URL");
+                let base_url = ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.base_url)
+                        .desired_width(f32::INFINITY),
+                );
+                if focus {
+                    base_url.request_focus();
+                }
+                ui.label("Model");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.model).desired_width(f32::INFINITY),
+                );
+                ui.label("API key");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.api_key)
+                        .desired_width(f32::INFINITY)
+                        .password(true),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        match self.apply_connection(transport) {
+                            Ok(()) => changed = true,
+                            Err(error) => self.connection_error = Some(error),
+                        }
+                    }
+                    if ui.button("Clear connection").clicked() {
+                        self.configure(None, transport);
+                        changed = true;
+                    }
+                    ui.label(if self.available() {
+                        "Configured"
+                    } else {
+                        "Not configured"
+                    });
+                });
+                if let Some(error) = &self.connection_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+        changed
+    }
+
+    pub fn cancel(&mut self, trace: u32, transport: &mut dyn Transport) {
+        if let Some(active) = self.active.remove(&trace) {
+            active.cancel.abort();
+            Self::release(trace, active.run, transport);
+        }
+    }
+
+    fn release(trace: u32, session: u32, transport: &mut dyn Transport) {
+        let (reply, _) = oneshot::channel();
+        transport.analysis(
+            AnalysisRequest {
+                trace,
+                session,
+                request: u32::MAX,
+                action: AnalysisAction::Cancel,
+            },
+            reply,
+        );
+    }
+
+    pub fn poll_events(&mut self, transport: &mut dyn Transport) -> Vec<ChatUpdate> {
+        while let Ok(pending) = self.requests.try_recv() {
+            if self
+                .active
+                .get(&pending.request.trace)
+                .is_some_and(|active| active.run == pending.request.session)
+            {
+                transport.analysis(pending.request, pending.reply);
+            } else {
+                let _ = pending.reply.send(Err("Analysis cancelled".into()));
+            }
+        }
+        let mut events = Vec::new();
+        for (&trace, active) in &mut self.active {
+            let activity = Self::drain_activity(active);
+            if !activity.is_empty() {
+                events.push(ChatUpdate {
+                    trace,
+                    running: true,
+                    status: String::new(),
+                    reply: None,
+                    activity,
+                });
+            }
+        }
+        while let Ok(done) = self.finished.try_recv() {
+            if !self
+                .active
+                .get(&done.trace)
+                .is_some_and(|active| active.run == done.run)
+            {
+                continue;
+            }
+            let activity = self
+                .active
+                .remove(&done.trace)
+                .map(|mut active| Self::drain_activity(&mut active))
+                .unwrap_or_default();
+            Self::release(done.trace, done.run, transport);
+            events.push(match done.result {
+                Ok(text) => ChatUpdate {
+                    trace: done.trace,
+                    running: false,
+                    status: "Analysis complete".into(),
+                    reply: Some(text),
+                    activity,
+                },
+                Err(error) => ChatUpdate {
+                    trace: done.trace,
+                    running: false,
+                    status: error.to_string(),
+                    reply: None,
+                    activity,
+                },
+            });
+        }
+        events
+    }
+
+    fn drain_activity(active: &mut Active) -> Vec<ActivityEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = active.activity.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn start(&mut self, trace: u32, chat: &mut Chat) -> Result<(), String> {
+        let config = self
+            .config
+            .clone()
+            .ok_or("No agent connection configured")?;
+        if self.active.len() >= 2 {
+            return Err("Agent busy: two analyses are already running".into());
+        }
+        if self.active.contains_key(&trace) {
+            return Err("An analysis is already running in this tab".into());
+        }
+        let text = chat.input.trim().to_owned();
+        if text.is_empty() {
+            return Ok(());
+        }
+        if text.len() > 16 * 1024 {
+            return Err("Question exceeds 16 KiB".into());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.runtime.is_none() {
+            self.runtime = Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        self.next_run = self
+            .next_run
+            .checked_add(1)
+            .ok_or("Analysis session IDs exhausted; reopen the viewer")?;
+        let run = self.next_run;
+        chat.messages.push(Message {
+            role: Role::User,
+            text,
+        });
+        xonata_agent::trim_history(&mut chat.messages);
+        let history = chat.messages.clone();
+        let client = TraceClient::new(self.sender.clone(), trace, run);
+        let (cancel, registration) = AbortHandle::new_pair();
+        let (activity, activity_rx) = mpsc::channel(8);
+        let finish = self.finish.clone();
+        let future = async move {
+            let result = xonata_agent::run(config, client, history, activity, registration).await;
+            let _ = finish.unbounded_send(Finished { trace, run, result });
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(runtime) = &self.runtime {
+            runtime.spawn(future);
+        }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(future);
+        self.active.insert(
+            trace,
+            Active {
+                run,
+                cancel,
+                activity: activity_rx,
+            },
+        );
+        chat.input.clear();
+        chat.activity.reset();
+        chat.running = true;
+        chat.status = "Analyzing…".into();
+        Ok(())
+    }
+
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        trace: u32,
+        complete: bool,
+        chat: &mut Chat,
+        canvas: Rect,
+        transport: &mut dyn Transport,
+    ) -> bool {
+        if !chat.open {
+            return false;
+        }
+        let mut open = chat.open;
+        let mut connection_changed = false;
+        egui::Window::new("Ask agent")
+            .id(egui::Id::new((trace, "agent")))
+            .open(&mut open)
+            .default_pos(egui::pos2(canvas.left() + 50.0, canvas.top() + 60.0))
+            .collapsible(false)
+            .default_width(460.0)
+            .default_height(400.0)
+            .resizable(true)
+            .constrain_to(canvas)
+            .show(ctx, |ui| {
+                connection_changed =
+                    self.connection_settings(ui, transport, chat.focus_input && !self.available());
+                if !self.available() {
+                    ui.label("Agent connection is not configured.");
+                }
+                if !complete {
+                    ui.label("Wait for trace loading to finish.");
+                }
+                let input_height = ui.text_style_height(&egui::TextStyle::Body) * 4.0 + 8.0;
+                let history_height = (ui.available_height() - input_height - 65.0).max(80.0);
+                let details_height = if chat.activity.expanded {
+                    (history_height * 0.6).min(crate::chat_activity::DETAILS_HEIGHT)
+                } else {
+                    0.0
+                };
+                egui::ScrollArea::vertical()
+                    .id_salt((trace, "agent-history"))
+                    .max_height(history_height - details_height)
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for message in &chat.messages {
+                            ui.label(
+                                egui::RichText::new(match message.role {
+                                    Role::User => "You",
+                                    Role::Assistant => "Agent",
+                                })
+                                .strong(),
+                            );
+                            ui.add(egui::Label::new(&message.text).wrap().selectable(true));
+                            ui.add_space(8.0);
+                        }
+                    });
+                chat.activity
+                    .show(ui, trace, &chat.status, chat.running, details_height);
+                let input = ui
+                    .scope(|ui| {
+                        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                        ui.spacing_mut().scroll.bar_width = 4.0;
+                        ui.spacing_mut().scroll.bar_inner_margin = 2.0;
+                        egui::ScrollArea::vertical()
+                            .id_salt((trace, "agent-input"))
+                            .max_height(input_height)
+                            .show(ui, |ui| {
+                                ui.add_enabled(
+                                    !chat.running,
+                                    egui::TextEdit::multiline(&mut chat.input)
+                                        .desired_rows(4)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Ask about this trace · Shift+Enter for newline")
+                                        .return_key(egui::KeyboardShortcut::new(
+                                            egui::Modifiers::SHIFT,
+                                            egui::Key::Enter,
+                                        )),
+                                )
+                            })
+                            .inner
+                    })
+                    .inner;
+                let enter = input.has_focus()
+                    && ui.input_mut(|input| {
+                        let event = input.events.iter().position(|event| {
+                            matches!(event,
+                        egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+                            if *modifiers == egui::Modifiers::NONE)
+                        });
+                        if let Some(index) = event {
+                            input.events.remove(index);
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                if chat.focus_input {
+                    if self.available() {
+                        input.request_focus();
+                        if let Some(mut state) = egui::TextEdit::load_state(ctx, input.id) {
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(chat.input.chars().count()),
+                                )));
+                            state.store(ctx, input.id);
+                        }
+                    }
+                    chat.focus_input = false;
+                }
+                ui.horizontal(|ui| {
+                    let send = ui
+                        .add_enabled(
+                            self.available()
+                                && complete
+                                && !chat.running
+                                && !chat.input.trim().is_empty(),
+                            egui::Button::new("Send"),
+                        )
+                        .clicked();
+                    if (send || enter)
+                        && complete
+                        && !chat.running
+                        && let Err(error) = self.start(trace, chat)
+                    {
+                        chat.status = error;
+                    }
+                    if ui
+                        .add_enabled(chat.running, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        self.cancel(trace, transport);
+                        chat.running = false;
+                        chat.status = "Analysis cancelled".into();
+                        chat.activity.settle(ui.input(|input| input.time));
+                    }
+                });
+            });
+        chat.open = open;
+        connection_changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use xonata_core::{Event, Request};
+
+    #[derive(Default)]
+    struct Host {
+        requests: Vec<AnalysisRequest>,
+    }
+
+    impl Transport for Host {
+        fn open_dialog(&mut self) {}
+
+        fn request(&mut self, _: Request) {}
+
+        fn poll(&mut self) -> Vec<Event> {
+            Vec::new()
+        }
+
+        fn analysis(&mut self, request: AnalysisRequest, reply: AnalysisReply) {
+            self.requests.push(request);
+            let _ = reply.send(Ok(json!({})));
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn open_paths(&mut self, _: Vec<std::path::PathBuf>) {}
+    }
+
+    fn active(run: u32) -> Active {
+        let (cancel, _) = AbortHandle::new_pair();
+        let (_, activity) = mpsc::channel(8);
+        Active {
+            run,
+            cancel,
+            activity,
+        }
+    }
+
+    #[test]
+    fn lifecycle_events_should_survive_one_poll_and_reject_cancelled_runs() {
+        let mut chats = Chats::default();
+        let mut host = Host::default();
+        let mut run = active(10);
+        let (mut sender, receiver) = mpsc::channel(8);
+        run.activity = receiver;
+        chats.active.insert(1, run);
+        sender
+            .try_send(ActivityEvent::Started {
+                id: 1,
+                turn: 1,
+                tool: None,
+            })
+            .unwrap();
+        sender
+            .try_send(ActivityEvent::Finished {
+                id: 1,
+                failed: false,
+                output: None,
+            })
+            .unwrap();
+        let live = chats.poll_events(&mut host);
+        assert_eq!(live.len(), 1);
+        assert!(live[0].running);
+        assert_eq!(live[0].activity.len(), 2);
+        sender
+            .try_send(ActivityEvent::Started {
+                id: 2,
+                turn: 2,
+                tool: None,
+            })
+            .unwrap();
+        chats.cancel(1, &mut host);
+        chats.active.insert(1, active(11));
+        chats
+            .finish
+            .unbounded_send(Finished {
+                trace: 1,
+                run: 10,
+                result: Ok("old answer".into()),
+            })
+            .unwrap();
+        assert!(chats.poll_events(&mut host).is_empty());
+    }
+
+    #[test]
+    fn replies_keep_tab_identity_and_stale_runs_cannot_complete_a_new_run() {
+        let mut chats = Chats::default();
+        let mut host = Host::default();
+        chats.active.insert(1, active(10));
+        chats.active.insert(2, active(11));
+        chats
+            .finish
+            .unbounded_send(Finished {
+                trace: 2,
+                run: 11,
+                result: Ok("tab two".into()),
+            })
+            .unwrap();
+        let updates = chats.poll_events(&mut host);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].trace, 2);
+        assert_eq!(updates[0].reply.as_deref(), Some("tab two"));
+        assert!(chats.active.contains_key(&1));
+        chats.cancel(1, &mut host);
+        chats.active.insert(1, active(12));
+        chats
+            .finish
+            .unbounded_send(Finished {
+                trace: 1,
+                run: 10,
+                result: Ok("stale".into()),
+            })
+            .unwrap();
+        assert!(chats.poll_events(&mut host).is_empty());
+        assert_eq!(chats.active[&1].run, 12);
+        assert!(
+            host.requests
+                .iter()
+                .all(|r| matches!(r.action, AnalysisAction::Cancel))
+        );
+    }
+
+    #[test]
+    fn connection_edits_require_apply_and_invalid_values_preserve_active_runs() {
+        let mut chats = Chats::default();
+        let mut host = Host::default();
+        chats.configure(
+            Some(AgentConfig {
+                base_url: "http://localhost/v1".into(),
+                api_key: "original-key".into(),
+                model: "original-model".into(),
+            }),
+            &mut host,
+        );
+        chats.active.insert(1, active(10));
+        chats.draft.base_url = "${location.origin}/llm".into();
+        assert!(chats.apply_connection(&mut host).is_err());
+        assert_eq!(
+            chats.config.as_ref().unwrap().base_url,
+            "http://localhost/v1"
+        );
+        assert!(chats.active.contains_key(&1));
+        assert!(host.requests.is_empty());
+        chats.draft.base_url = "  http://127.0.0.1:8000/llm  ".into();
+        chats.draft.api_key = " new-key ".into();
+        chats.draft.model = " new-model ".into();
+        chats.apply_connection(&mut host).unwrap();
+        let config = chats.config.as_ref().unwrap();
+        assert_eq!(config.base_url, "http://127.0.0.1:8000/llm");
+        assert_eq!(config.api_key, "new-key");
+        assert_eq!(config.model, "new-model");
+        assert!(chats.active.is_empty());
+        assert!(matches!(host.requests[0].action, AnalysisAction::Cancel));
+        chats.configure(None, &mut host);
+        assert!(!chats.available());
+        assert!(chats.draft.api_key.is_empty());
+        assert_eq!(chats.draft.base_url, "http://localhost:4000/v1");
+        assert_eq!(chats.draft.model, "rig-chat");
+    }
+
+    #[test]
+    fn configuration_replacement_cancels_all_runs_and_rejects_queued_tools() {
+        let mut chats = Chats::default();
+        let mut host = Host::default();
+        chats.active.insert(1, active(10));
+        chats.active.insert(2, active(11));
+        let (reply, receive) = oneshot::channel();
+        chats
+            .sender
+            .try_send(xonata_agent::PendingRequest {
+                request: AnalysisRequest {
+                    trace: 1,
+                    session: 10,
+                    request: 2,
+                    action: AnalysisAction::Info,
+                },
+                reply,
+            })
+            .unwrap();
+        chats.configure(None, &mut host);
+        assert!(!chats.available());
+        assert!(chats.poll_events(&mut host).is_empty());
+        assert!(futures::executor::block_on(receive).unwrap().is_err());
+        assert_eq!(host.requests.len(), 2);
+        assert!(chats.active.is_empty());
+    }
+
+    #[test]
+    fn concurrency_limits_report_busy_without_starting_another_run() {
+        let mut chats = Chats::default();
+        chats.config = Some(AgentConfig {
+            api_key: "test".into(),
+            base_url: "http://localhost/v1".into(),
+            model: "mock".into(),
+        });
+        chats.active.insert(1, active(1));
+        chats.active.insert(2, active(2));
+        let mut chat = Chat {
+            input: "question".into(),
+            ..Default::default()
+        };
+        assert!(chats.start(3, &mut chat).unwrap_err().contains("busy"));
+        assert!(!chat.running);
+        assert!(chat.messages.is_empty());
+    }
+}

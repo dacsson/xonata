@@ -1,0 +1,6 @@
+/target
+/web/pkg/
+/web/font-license.txt
+/drive-download-*/
+/Cargo.lock
+/skills-lock.json

@@ -1,0 +1,655 @@
+//! Serializable trace records and bounded worker protocol.
+use serde::{Deserialize, Serialize};
+
+/// Trace values offered by the graphical filter builder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionField {
+    /// Disassembly excerpts.
+    Instruction,
+    /// Phase names.
+    Phase,
+    /// Lane names.
+    Lane,
+    /// Instruction and phase metadata lines.
+    Metadata,
+    /// Instruction metadata lines.
+    OperationMetadata,
+    /// Phase metadata lines.
+    PhaseMetadata,
+}
+
+/// One named pipeline interval. End is exclusive.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Stage {
+    /// Interned stage name.
+    pub name: u32,
+    /// Interned lane name.
+    pub lane: u32,
+    /// First cycle.
+    pub start: u64,
+    /// End cycle; absent while the interval is open.
+    pub end: Option<u64>,
+    /// Stage metadata.
+    pub labels: String,
+}
+
+/// Consumer-to-producer dependency.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Dependency {
+    /// Producer operation ID.
+    pub producer: u64,
+    /// Dependency type supplied by the trace.
+    pub kind: u64,
+    /// Cycle at which the dependency was recorded.
+    pub cycle: u64,
+}
+
+/// One instruction, including all associated metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Operation {
+    /// File-local ID.
+    pub id: u64,
+    /// Simulator ID.
+    pub gid: u64,
+    /// Thread ID.
+    pub tid: u64,
+    /// Retirement ID, including speculative IDs on flushed operations.
+    pub rid: Option<u64>,
+    /// First observed cycle.
+    pub fetch: u64,
+    /// Retirement, flush, or EOF cycle.
+    pub end: Option<u64>,
+    /// Whether the operation was flushed.
+    pub flushed: bool,
+    /// Whether it reached EOF without retirement.
+    pub incomplete: bool,
+    /// Source line of the I command.
+    pub line: u64,
+    /// Disassembly label.
+    pub label: String,
+    /// Instruction metadata.
+    pub detail: String,
+    /// Pipeline intervals in insertion order.
+    pub stages: Vec<Stage>,
+    /// Dependencies recorded on this consumer.
+    pub dependencies: Vec<Dependency>,
+}
+
+impl Operation {
+    /// Approximate owned size, including allocated collections.
+    pub fn memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.label.capacity()
+            + self.detail.capacity()
+            + self.stages.capacity() * std::mem::size_of::<Stage>()
+            + self
+                .stages
+                .iter()
+                .map(|s| s.labels.capacity())
+                .sum::<usize>()
+            + self.dependencies.capacity() * std::mem::size_of::<Dependency>()
+    }
+
+    /// Produces plain text suitable for pinning or copying.
+    pub fn metadata(&self, symbols: &[String]) -> String {
+        let mut text = format!(
+            "{}\nOp {} · Global {} · Thread {}\nRetired ID: {:?}\nCycles: {}–{} · Source line {}\nStatus: {}\n{}",
+            self.label,
+            self.id,
+            self.gid,
+            self.tid,
+            self.rid,
+            self.fetch,
+            self.end.map_or_else(|| "active".into(), |v| v.to_string()),
+            self.line,
+            if self.flushed {
+                "flushed"
+            } else if self.incomplete {
+                "incomplete"
+            } else if self.rid.is_some() {
+                "retired"
+            } else {
+                "active"
+            },
+            self.detail
+        );
+        for stage in &self.stages {
+            text.push_str(&format!(
+                "\n{} / {}: {}–{} {}",
+                symbol(symbols, stage.lane),
+                symbol(symbols, stage.name),
+                stage.start,
+                stage.end.map_or_else(|| "active".into(), |v| v.to_string()),
+                stage.labels
+            ));
+        }
+        for dep in &self.dependencies {
+            text.push_str(&format!(
+                "\nDepends on {} · type {} · cycle {}",
+                dep.producer, dep.kind, dep.cycle
+            ));
+        }
+        text
+    }
+}
+
+/// Resolves a symbol without panicking on malformed external data.
+pub fn symbol(symbols: &[String], index: u32) -> &str {
+    symbols.get(index as usize).map_or("?", String::as_str)
+}
+
+/// Inclusive numeric search interval.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct NumberRange {
+    /// Optional inclusive lower bound.
+    pub min: Option<u64>,
+    /// Optional inclusive upper bound.
+    pub max: Option<u64>,
+}
+impl NumberRange {
+    /// Tests whether a value lies inside the interval.
+    pub fn contains(&self, value: u64) -> bool {
+        self.min.is_none_or(|min| value >= min) && self.max.is_none_or(|max| value <= max)
+    }
+}
+
+/// Structured search query; empty text matches every instruction allowed by filters.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SearchQuery {
+    /// Literal or regular-expression text.
+    pub text: String,
+    /// Interpret text as a regular expression.
+    pub regex: bool,
+    /// Match case exactly.
+    pub case_sensitive: bool,
+    /// Operation ID filter.
+    pub op: NumberRange,
+    /// Global ID filter.
+    pub global: NumberRange,
+    /// Retirement ID filter.
+    pub retired_id: NumberRange,
+    /// Thread ID filter.
+    pub thread: NumberRange,
+    /// Cycle interval overlap filter.
+    pub cycles: NumberRange,
+    /// Literal stage-name filter.
+    pub stage: String,
+    /// Status: all, retired, flushed, or incomplete.
+    pub status: String,
+}
+
+/// A result row; snippets are fetched lazily with the operation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// Matching instruction.
+    pub op: Operation,
+    /// Display row including flushed operations.
+    pub row: u64,
+    /// Names and snippets of the matching textual fields.
+    pub snippets: Vec<String>,
+}
+
+/// A visible instruction row.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Row {
+    /// Display row in the requested filter.
+    pub index: u64,
+    /// Instruction data.
+    pub op: Operation,
+}
+
+/// Trace loading and storage status.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TraceInfo {
+    /// Application-assigned trace ID.
+    pub id: u32,
+    /// Display file name.
+    pub name: String,
+    /// Number of instructions.
+    pub count: u64,
+    /// Flushed instruction count.
+    pub flushed: u64,
+    /// First absolute cycle.
+    pub first_cycle: u64,
+    /// Last observed cycle.
+    pub last_cycle: u64,
+    /// Parsing finished successfully.
+    pub complete: bool,
+    /// Count of recoverable parser warnings.
+    pub warning_count: u64,
+    /// Bounded sample of warnings.
+    pub warnings: Vec<String>,
+    /// Stage and lane symbol table.
+    pub symbols: Vec<String>,
+    /// Bytes received from the source file.
+    pub bytes: u64,
+}
+
+/// Compact whole-trace image built off the UI thread.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OverviewRaster {
+    /// Image width in pixels (at most 256).
+    pub width: u16,
+    /// Image height in pixels (at most 1024).
+    pub height: u16,
+    /// Row-major palette indices: zero is empty, 1–8 are phase colors;
+    /// the high bit indicates a flushed instruction.
+    pub pixels: Vec<u8>,
+}
+
+/// Inclusive operation and unfiltered row bounds for an agent area selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaBounds {
+    /// First operation ID; IDs inside the interval may have gaps.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub first_id: u64,
+    /// Last operation ID.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub last_id: u64,
+    /// First unfiltered row, indexed from zero.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub first_row: u64,
+    /// Last unfiltered row, indexed from zero.
+    #[serde(with = "crate::filter::decimal_u64")]
+    pub last_row: u64,
+}
+
+/// Commands shared by native and browser workers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Request {
+    /// Releases all trace-owned resources.
+    Close {
+        /// Trace ID.
+        trace: u32,
+    },
+    /// Resolves two displayed row endpoints without decoding the selected area.
+    AreaBounds {
+        /// Trace ID.
+        trace: u32,
+        /// Selection generation.
+        generation: u32,
+        /// First displayed row, indexed from zero.
+        #[serde(with = "crate::filter::decimal_u64")]
+        start: u64,
+        /// Last displayed row, indexed from zero.
+        #[serde(with = "crate::filter::decimal_u64")]
+        end: u64,
+        /// Displayed rows exclude flushed operations.
+        hide_flushed: bool,
+    },
+    /// Retrieves only visible rows, sampling when zoomed out.
+    View {
+        /// Trace ID.
+        trace: u32,
+        /// View generation.
+        generation: u32,
+        /// First row.
+        start: u64,
+        /// Row stride.
+        stride: u64,
+        /// Maximum rows.
+        count: u32,
+        /// Exclude flushed instructions.
+        hide_flushed: bool,
+    },
+    /// Builds a bounded overview after parsing finishes.
+    Overview {
+        /// Trace ID.
+        trace: u32,
+        /// Overview generation.
+        generation: u32,
+        /// Requested raster width.
+        width: u16,
+        /// Requested raster height.
+        height: u16,
+    },
+    /// Finds an instruction by its unfiltered pipeline row.
+    JumpRow {
+        /// Trace ID.
+        trace: u32,
+        /// Unfiltered row index.
+        row: u64,
+    },
+    /// Starts or replaces a search.
+    Search {
+        /// Trace ID.
+        trace: u32,
+        /// Query generation.
+        generation: u32,
+        /// Query.
+        query: Box<SearchQuery>,
+    },
+    /// Stops scanning and removes the search index.
+    CancelSearch {
+        /// Trace ID.
+        trace: u32,
+    },
+    /// Retrieves a bounded window of search results.
+    Results {
+        /// Trace ID.
+        trace: u32,
+        /// Query generation.
+        generation: u32,
+        /// First result.
+        start: u64,
+        /// Maximum results.
+        count: u32,
+    },
+    /// Discovers bounded suggestions after trace loading completes.
+    FilterSuggestions {
+        /// Trace ID.
+        trace: u32,
+        /// Independent suggestion generation.
+        generation: u32,
+        /// Values to discover.
+        field: SuggestionField,
+        /// Case-insensitive contains pattern, supporting wildcards.
+        text: String,
+    },
+    /// Runs a phase filter.
+    Filter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Textual filter expression.
+        text: String,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Matching target instructions to skip.
+        skip: u64,
+    },
+    /// Cancels the active scan while preserving the drawn generation.
+    CancelFilter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+    },
+    /// Sorts existing results by signed elapsed cycles on the worker.
+    FilterSort {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Independent result-view revision.
+        revision: u32,
+        /// Highest elapsed counts first when true; lowest first otherwise.
+        descending: bool,
+    },
+    /// Retrieves a bounded page from the elapsed-sorted result view.
+    SortedFilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Result-view revision.
+        revision: u32,
+        /// First position in the sorted list.
+        #[serde(with = "crate::filter::decimal_u64")]
+        start: u64,
+        /// Maximum page size.
+        count: u32,
+    },
+    /// Retrieves a bounded page of original compact filter results.
+    FilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// First result index.
+        start: u64,
+        /// Maximum page size.
+        count: u32,
+    },
+    /// Loads one source operation for exact filter-result navigation.
+    RevealFilter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Stable result index.
+        #[serde(with = "crate::filter::decimal_u64")]
+        index: u64,
+    },
+    /// Activates a completed filter result set for drawing.
+    DrawFilter {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Optional drawing label override.
+        label: String,
+    },
+    /// Clears the drawn set without deleting an active query's results.
+    ClearFilterDrawing {
+        /// Trace ID.
+        trace: u32,
+    },
+    /// Requests bounded rectangles intersecting the viewport.
+    FilterViewport {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Viewport request generation.
+        request: u32,
+
+        /// Exact viewport bounds.
+        bounds: crate::filter::FilterBounds,
+        /// Selected result index as an exact decimal string.
+        selected: Option<String>,
+    },
+    /// Finds an operation or retirement ID.
+    Jump {
+        /// Trace ID.
+        trace: u32,
+        /// Target ID.
+        id: u64,
+        /// Interpret ID as retirement ID.
+        retired: bool,
+    },
+}
+
+/// Worker responses. UI ignores responses for obsolete generations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Event {
+    /// Resolved agent area endpoints; absent for empty or unavailable rows.
+    AreaBounds {
+        /// Trace ID.
+        trace: u32,
+        /// Selection generation.
+        generation: u32,
+        /// Exact operation and unfiltered row bounds.
+        bounds: Option<AreaBounds>,
+    },
+    /// Updated trace information.
+    Info {
+        /// Trace status.
+        info: TraceInfo,
+    },
+    /// Viewport data.
+    View {
+        /// Trace ID.
+        trace: u32,
+        /// View generation.
+        generation: u32,
+        /// Visible rows.
+        rows: Vec<Row>,
+    },
+    /// Completed compact overview image.
+    Overview {
+        /// Trace ID.
+        trace: u32,
+        /// Overview generation.
+        generation: u32,
+        /// Phase palette raster.
+        raster: OverviewRaster,
+    },
+    /// Search scan progress; total is provisional until done.
+    SearchProgress {
+        /// Trace ID.
+        trace: u32,
+        /// Query generation.
+        generation: u32,
+        /// Matching instruction count.
+        total: u64,
+        /// Fraction scanned.
+        progress: f32,
+        /// Scan finished.
+        done: bool,
+    },
+    /// Requested search rows.
+    Results {
+        /// Trace ID.
+        trace: u32,
+        /// Query generation.
+        generation: u32,
+        /// First result index.
+        start: u64,
+        /// Results.
+        hits: Vec<SearchHit>,
+    },
+    /// Progressive trace-backed filter suggestions.
+    FilterSuggestions {
+        /// Trace ID.
+        trace: u32,
+        /// Independent suggestion generation.
+        generation: u32,
+        /// Values discovered.
+        field: SuggestionField,
+        /// Up to 16 distinct matching trace values, at most 160 characters each.
+        values: Vec<String>,
+        /// Whether scanning has finished or the suggestion limit was reached.
+        done: bool,
+    },
+    /// Progress of phase filtering.
+    FilterProgress {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Original result count.
+        total: u64,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Unknown END endpoints skipped.
+        skipped: u64,
+
+        /// Fraction scanned.
+        progress: f32,
+        /// Whether scanning finished.
+        done: bool,
+        /// Validated drawing options.
+        options: crate::filter::DrawOptions,
+    },
+    /// Paged compact filter results.
+    FilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// First result index.
+        start: u64,
+        /// Bounded filter results.
+        hits: Vec<crate::filter::FilterHit>,
+    },
+    /// Progress of sorting existing results.
+    FilterSortProgress {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Result-view revision.
+        revision: u32,
+        /// Original result count.
+        #[serde(with = "crate::filter::decimal_u64")]
+        total: u64,
+        /// Fraction of the current sorting pass completed.
+        progress: f32,
+        /// Whether sorting is complete.
+        done: bool,
+    },
+    /// A page of elapsed-sorted hits retaining their original indexes.
+    SortedFilterResults {
+        /// Trace ID.
+        trace: u32,
+        /// Original filter generation.
+        generation: u32,
+        /// Result-view revision.
+        revision: u32,
+        /// First position in the sorted list.
+        #[serde(with = "crate::filter::decimal_u64")]
+        start: u64,
+        /// Original result records.
+        hits: Vec<crate::filter::FilterHit>,
+    },
+    /// Filter-specific inline failure, rather than a global modal.
+    FilterError {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Inline error description.
+        message: String,
+    },
+    /// Exact selection requested by a filter result click.
+    FilterSelection {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Selected compact result.
+        hit: crate::filter::FilterHit,
+        /// Operation encoded as JSON text to retain integer precision through JS.
+        operation: String,
+    },
+    /// A completed result set has replaced the previous drawing set.
+    FilterDrawn {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Validated drawing options.
+        options: crate::filter::DrawOptions,
+    },
+    /// Viewport-intersecting rectangles, capped at 2,048.
+    FilterDrawing {
+        /// Trace ID.
+        trace: u32,
+        /// Filter generation.
+        generation: u32,
+        /// Viewport request generation.
+        request: u32,
+        #[serde(with = "crate::filter::decimal_u64")]
+        /// Total intersecting rectangles, including preview overflow.
+        visible: u64,
+        /// Bounded filter results.
+        hits: Vec<crate::filter::FilterHit>,
+    },
+    /// Navigation destination.
+    Jump {
+        /// Trace ID.
+        trace: u32,
+        /// Instruction and unfiltered row.
+        row: Option<Row>,
+    },
+    /// Recoverable application error.
+    Error {
+        /// Trace ID, if known.
+        trace: u32,
+        /// User-readable explanation.
+        message: String,
+    },
+    /// Global cache metrics.
+    Metrics {
+        /// Decoded-page bytes.
+        decoded_bytes: usize,
+        /// Resident page count.
+        pages: usize,
+    },
+}

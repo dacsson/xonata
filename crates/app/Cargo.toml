@@ -1,0 +1,32 @@
+[package]
+name = "xonata-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xonata"
+path = "src/main.rs"
+
+[dependencies]
+xonata-core = { path = "../core" }
+xonata-agent = { path = "../agent" }
+futures = "0.3"
+xonata-view = { path = "../view" }
+serde.workspace = true
+serde_json.workspace = true
+egui.workspace = true
+eframe.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
+rfd = "0.15"
+futures-lite = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures.workspace = true
+
+[lints]
+workspace = true

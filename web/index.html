@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#13171d">
+  <title>Xonata · pipeline viewer</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #13171d; color: #dae2eb; font-family: ui-monospace, monospace; }
+    canvas { display: block; width: 100%; height: 100%; outline: none; }
+    #loading { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 8px; pointer-events: none; }
+    #loading strong { color: #68b7bb; letter-spacing: .16em; font-size: 22px; }
+    #loading span { color: #8f9fae; }
+  </style>
+</head>
+<body>
+  <div id="loading"><strong>XONATA</strong><span>Loading viewer…</span></div>
+  <canvas id="viewer" tabindex="0" aria-label="Xonata pipeline viewer"></canvas>
+  <script type="module">
+    import init, { WebHandle } from './pkg/xonata_web.js';
+    const loading = document.getElementById('loading');
+    try {
+      await init();
+      const viewer = new WebHandle();
+      await viewer.start(document.getElementById('viewer'));
+      loading.remove();
+      window.xonata = viewer;
+    } catch (error) {
+      loading.querySelector('span').textContent = String(error);
+      console.error(error);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[package]
+name = "xonata-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+xonata-core = { path = "../core" }
+rig = { version = "=0.45.0", default-features = false, features = ["agent", "reqwest", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+futures = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt", "time", "net", "sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+[lints]
+workspace = true
