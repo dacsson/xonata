@@ -1,7 +1,7 @@
 # Xonata
 
 > [!WARNING]
-> Beware! This is a completely vibecoded project...
+> Beware! This is almost completely vibecoded project...
 
 A Rust viewer for Kanata v4 pipeline traces. Runs natively or in a browser through WebAssembly, without Electron. Browser traces stay local.
 
