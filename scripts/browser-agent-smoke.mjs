@@ -7,6 +7,7 @@ import {inflateSync} from 'node:zlib';
 
 const root = resolve(process.env.XONATA_WEB_ROOT || 'web');
 const base = process.env.XONATA_BASE_PATH || '/';
+const workerFailure = process.env.XONATA_TEST_WORKER_FAILURE === '1';
 if (!base.startsWith('/') || !base.endsWith('/') || base.includes('..')) throw Error('Invalid base path');
 const requests = [];
 const responses = new Set();
@@ -41,7 +42,13 @@ const server = createServer(async (req,res) => {
     const file=resolve(root,'.'+path.slice(base.length-1));
     const actual=path===base ? resolve(root,'index.html') : file;
     if (!actual.startsWith(root+'/')) {res.writeHead(403).end();return;}
-    const data=await readFile(actual);
+    let data=await readFile(actual);
+    if (workerFailure && actual===resolve(root,'worker.js')) {
+      const source=data.toString();
+      assert(source.includes('return engine.analysis(data.payload);'));
+      data=Buffer.from(source.replace('return engine.analysis(data.payload);',
+        "if (!self.__testAnalysisFailed) { self.__testAnalysisFailed=true; throw Error('injected analysis worker failure'); } return engine.analysis(data.payload);"));
+    }
     res.writeHead(200,{'content-type':({'.html':'text/html','.js':'text/javascript','.wasm':'application/wasm'})[extname(actual)]||'application/octet-stream'}).end(data);
   } catch {res.writeHead(404).end();}
 });
@@ -118,8 +125,12 @@ try {
   assert.equal(questionText,`${area}existing question\n${area}\n\nanalyze phases`,'Area context must append to the existing draft with surrounding newlines');
   assert(JSON.stringify(requests[0].messages.findLast(m=>m.role==='user').content).includes('\\nanalyze phases'), 'Shift+Enter newline was not preserved');
   const infoText=requests[1].messages.findLast(m=>m.role==='tool').content;
-  const info=JSON.parse(typeof infoText==='string'?infoText:infoText.map(c=>c.text||'').join(''));
-  assert.equal(info.data.first_cycle,'9007199254740993');
+  const infoValue=typeof infoText==='string'?infoText:infoText.map(c=>c.text||'').join('');
+  if (workerFailure) {
+    assert(infoValue.includes('Analysis worker failed: injected analysis worker failure'), 'Worker failure did not reach the model through the pending tool');
+  } else {
+    assert.equal(JSON.parse(infoValue).data.first_cycle,'9007199254740993');
+  }
   const resultText=requests[3].messages.findLast(m=>m.role==='tool').content;
   const result=JSON.parse(typeof resultText==='string'?resultText:resultText.map(c=>c.text||'').join(''));
   assert.equal(result.data.status.filter_total,'2');assert.equal(result.data.page.hits[0].elapsed,'4');

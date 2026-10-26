@@ -23,11 +23,10 @@ function fail(trace, error) {
   postMessage(JSON.stringify({ type: 'error', trace, message: String(error?.message || error) }));
 }
 
-function schedule(trace, task) {
+function schedule(trace, task, onError = (error) => fail(trace, error)) {
   const run = queue.then(async () => {
-    const engine = await ready;
-    try { emit(await task(engine)); }
-    catch (error) { fail(trace, error); throw error; }
+    try { emit(await task(await ready)); }
+    catch (error) { onError(error); throw error; }
   });
   queue = run.catch(() => {});
   return run;
@@ -52,7 +51,18 @@ self.onmessage = ({ data }) => {
     pending.add(data.id);
     void load(data.id, data.file);
   } else if (data.type === 'analysis') {
-    void schedule(0, (engine) => engine.analysis(data.payload)).catch(() => {});
+    try {
+      const {trace, session, request} = JSON.parse(data.payload);
+      void schedule(trace, (engine) => {
+        if (typeof engine.analysis !== 'function') {
+          throw Error('Worker does not support agent analysis; rebuild and deploy all web assets together, then reload.');
+        }
+        return engine.analysis(data.payload);
+      }, (error) => {
+        postMessage(JSON.stringify({type: 'analysis', trace, session, request,
+          result: {Err: `Analysis worker failed: ${String(error?.message || error)}`}}));
+      }).catch(() => {});
+    } catch (error) { fail(0, error); }
   } else if (data.type === 'request') {
     try {
       const request = JSON.parse(data.payload);
